@@ -1,0 +1,177 @@
+---
+title: "Expression Data for Michele Redell"
+author: "Jenny Smith"
+date: "11/18/2021"
+output: html_document
+---
+
+# Set-up 
+
+```{r setup, cache = FALSE, include = FALSE}
+require(knitr)
+knitr::opts_knit$set(root.dir = file.path(SCRATCH,"jlsmith3"))
+```
+
+
+```{r}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),
+                      tidy=TRUE,
+                      fig.align='center',
+                      fig.width = 10, fig.height = 10)
+node=Sys.info()[["nodename"]]
+if(!grepl("local", node)){
+  print(node)
+  options(bitmapType = 'cairo')
+  grDevices::X11.options(type='cairo')
+}
+
+options(stringsAsFactors = FALSE)
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+
+library(ggplot2)
+library(gridExtra)
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+
+library(DeGSEA)
+library(REDCapR)
+# library(keyring) #cannot install non-zero exit 
+
+getwd()
+```
+
+
+# Raw Counts
+
+```{r}
+genome <- "GRCh37"
+```
+
+
+## GRCh37 
+
+```{r}
+if(genome=="GRCh37"){
+  grch37_files <- dir(file.path(PROJHOME, "0000.00.03_ExpressionMatrices/BCCA_GRCh37_Ensembl_v69"),
+                      full.names=TRUE)
+  # grch37_files
+  
+  ##Counts 
+  grch37_cts_file <- grep("dupGenesRemoved_FractionalCounts", grch37_files,value=T)
+  cts_grch37 <- readRDS(file.path(grch37_cts_file))
+
+  gene_ids <- cts_grch37[,c(1:2)]
+  cts_grch37 <- as.data.frame(cts_grch37)
+  rownames(cts_grch37) <- cts_grch37$geneSymbol
+  cts_grch37 <- cts_grch37[,-c(1:2)]
+
+  
+  ##TPM
+  grch37_TPM_file <- grep("dupGenesRemoved_TPM", grch37_files, value = T)
+  TPM_grch37 <- readRDS(file.path(grch37_TPM_file))
+
+  gene_ids <- TPM_grch37[,c(1:2)]
+  TPM_grch37 <- as.data.frame(TPM_grch37)
+  rownames(TPM_grch37) <- TPM_grch37$geneSymbol
+  TPM_grch37 <- TPM_grch37[,-c(1:2)]
+
+  
+  ## 0531 TPM 
+  polyA_files <-  dir(grch37_files[grep("PolyA", grch37_files)], full.names = TRUE)
+  TPM_0531_grch37 <- read.csv(file.path(grep("AAML0531_dupGenesRemoved_TPM", polyA_files, value=T)), row.names = 1)
+  
+  ## discovery TPM 
+  TPM_dis_grch37 <- read.csv(file.path(grep("dupGenesRemoved_TPM_Aug2014.csv", polyA_files, value=TRUE)), row.names = 1)
+  
+}
+```
+
+
+# Sample Manifest
+
+```{r}
+sample_info <- read.csv(file.path(TARGET, "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_08.12.21.csv")) 
+
+dim(sample_info)
+```
+
+```{r}
+fq_manifest <- read.csv(file.path(TARGET, "SequencingDataMatrix/Fastq_manifests/TARGET_AML_RNAseq_Fastq_File_Manifest_shareable_08.11.21.csv"))
+
+head(fq_manifest)
+```
+
+# Subset Samples 
+
+```{r}
+requested <- c("PASZLJ","PARFAL","PAUNBR","PAWLTL","PAUTJD")
+length(requested)
+```
+
+```{r}
+samples_to_include <- fq_manifest %>% 
+  # filter(c(USI %in% requested & Time_point=="diagnostic") | Group=="NBM") %>% 
+  filter(c(USI %in% requested & Time_point=="diagnostic")) %>%
+  filter(!grepl("_replicate", Sample)) 
+  # filter(Group=="AML" | Sample %in% colnames(TPM_grch37))
+
+
+head(samples_to_include)
+table(samples_to_include$Time_point) #2 relapse, and 1 remission sample available too
+# length(unique(samples_to_include$Sample))
+# write.csv(samples_to_include, "TARGET_AML_Patient_Samples_Matched_PDX_manifest.csv", row.names = FALSE)
+```
+
+```{r}
+table(samples_to_include$Batch)
+```
+
+
+# Subset Counts 
+
+```{r}
+# head(TPM_0531_grch37[,1:5])
+# dim(TPM_0531_grch37)
+# table(requested %in% colnames(TPM_0531_grch37))
+# grep(paste(requested, collapse = "|"),colnames(TPM_0531_grch37), value=TRUE)
+```
+
+```{r}
+# head(TPM_dis_grch37[,1:5])
+samples <- grep(paste(requested, collapse = "|"), colnames(TPM_dis_grch37), value=TRUE)
+TPM_dis_subset <- TPM_dis_grch37[,samples] %>% 
+  rownames_to_column("gene_name") %>% 
+  select(-matches("04A"))
+
+
+
+head(TPM_dis_subset)
+# write.csv(TPM_dis_subset, "TARGET_AML_polyA_GRCh37_RNAseq_2014_TPM.csv", row.names = FALSE)
+```
+
+```{r}
+samples <- grep(paste(samples_to_include$Sample, collapse = "|"), colnames(TPM_grch37), value=TRUE)
+TPM_subset <- TPM_grch37[, samples] %>% 
+    rownames_to_column("gene_name") 
+
+
+dim(TPM_subset)
+# head(TPM_subset[,1:5])
+# write.csv(TPM_subset, "TARGET_AML_ribodelpleted_GRCh37_RNAseq_2017_TPM.csv", row.names = FALSE)
+```
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+

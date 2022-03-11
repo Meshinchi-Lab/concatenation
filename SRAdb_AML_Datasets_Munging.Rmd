@@ -1,0 +1,110 @@
+---
+title: "Find Relevant Datasets in SRAdb"
+author: "Jenny Smith"
+date: "1/3/19"
+output: html_document
+---
+
+```{r setup}
+library(knitr)
+knitr::opts_knit$set(root.dir = file.path(SCRATCH,"jlsmith3/Download_AML_RNA-seq/"))
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, 
+                      fig.align='center', fig.width = 10, fig.height = 10)
+options(stringsAsFactors = FALSE,bitmapType = 'cairo', device='x11')
+grDevices::X11.options(type='cairo')
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(Cairo)
+library(gridExtra)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(readr)
+# library(DeGSEA)
+getwd()
+```
+
+#SRAdb Download
+
+```{r message=FALSE}
+library(SRAdb)
+```
+
+```{r eval=FALSE}
+#only run 1x
+sqlfile <- getSRAdbFile()
+
+```
+
+```{r}
+sra_con <- dbConnect(SQLite(), sqlfile)
+```
+
+#Read in the SRA Accessions
+This was created using SRA advance search for AML RNAseq, and then ported into the SRA run browser. 
+
+```{r}
+accessions <- read.delim("SRR_Acc_List_AML_RNA-seq.txt",
+                         header = FALSE)
+head(accessions)
+```
+
+
+#Read in the metadata
+
+```{r}
+meta <- read.csv("SraRunTable_AML_RNA-seq.txt")
+
+head(meta)
+dim(meta)
+```
+
+```{r}
+table(meta$Center.Name, useNA='ifany')
+table(meta$cytogenetic_group,useNA='ifany')
+```
+
+```{r}
+SRA.Studies <- select(meta, SRA.Study) %>% 
+  group_by(SRA.Study) %>% 
+  summarise(N=n()) %>% 
+  ungroup() %>% 
+  arrange(desc(N))
+
+
+head(SRA.Studies, n=10)
+```
+
+
+#Download more information about the runs
+
+```{r}
+sra_tables <- dbListTables(sra_con)
+```
+
+
+```{r}
+table_fields <- lapply(sra_tables, function(x) dbListFields(sra_con,x))
+names(table_fields) <- sra_tables
+
+table_fields
+```
+
+study, sample, run, experiment
+
+```{r}
+SRP012000
+```
+
+SRA.Study
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+

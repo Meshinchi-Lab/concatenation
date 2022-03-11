@@ -1,0 +1,411 @@
+---
+title: "Annotate BCCA Gene References"
+author: "Jenny Smith"
+date: "April 6, 2020"
+output: html_document
+---
+
+#Set-Up
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, 
+                      fig.align='center', fig.height = 10,
+                      fig.width = 10)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,'0000.00.02_Reference_GeneInfo/'))
+options(stringsAsFactors=FALSE,  java.parameters = "-Xmx4g",
+        bitmapType = 'cairo',device='x11' )
+```
+
+```{r message=FALSE}
+# library(Cairo)
+library(xlsx)
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(stringr)
+library(reshape2)
+library(venn)
+library(tibble)
+library(tidyr)
+library(DeGSEA)
+library(pryr)
+library(purrr)
+library(gridExtra)
+getwd()
+```
+
+```{r}
+cts <- readRDS(file.path(PROJHOME,"2019.12.31_UMAP_Clustering","Expression_Data/TARGET_AML_DSAML_MPN_NBM_Ribodepleted_dupGenesRemoved_Fractionalcounts.RDS"))
+
+
+dim(cts)
+```
+
+```{r}
+Gene.IDmap <- read.csv(file.path("GeneSymbol_Ensembl_ID_Conversion_GRCh37.69_FromBCCA.csv"))
+
+dim(Gene.IDmap)
+head(Gene.IDmap)
+```
+
+#Annotate with TM Helices and Cellular localization
+
+```{r}
+Genes <- data.frame(Gene=rownames(cts)) 
+
+dim(Genes) #48230     1
+table(duplicated(Genes$Gene))
+```
+
+```{r}
+Gene.anno <- gene_protein_anno(df=Genes,gene.name.col = "Gene")
+
+dim(Gene.anno) # 145978     24
+# head(Gene.anno)
+Gene.anno
+```
+
+
+```{r eval=FALSE}
+#function to extract gene level annotation infromation. 
+geneID.map.anno <- Gene.anno %>%
+        mutate_all(funs(ifelse(is.na(.), "", .))) %>% 
+        arrange(gene_id) %>%
+        mutate(Ensembl_ProteinID=ifelse(Cellular.Compartment_Membrane== "",
+                                       "", Ensembl_ProteinID)) %>%
+
+        #any gene with at least 1 TMhelix detected for  any of its transcripts, has a TMhelix.
+        group_by(gene_id) %>%
+        mutate(Predicted_Transmembrane_Structure = case_when(
+                  any(grepl("TM", Predicted_Transmembrane_Structure)) ~ "TMhelix",
+                  TRUE ~ Predicted_Transmembrane_Structure)) %>%
+        arrange(Cellular.Compartment_Membrane) %>%
+        dplyr::filter( grepl("^[A-Z].+", Cellular.Compartment_Membrane) | 
+                  (!duplicated(gene_id, fromLast = TRUE) )) %>%
+        # ungroup()  %>% 
+        # 
+        # group_by(gene_id) %>% 
+        mutate_at(vars(Ensembl_ProteinID:Cellular.Compartment_Receptors),
+                  funs(collapseRows(., uniq = TRUE, split = TRUE, sep="; "))) %>% 
+        dplyr::filter(!duplicated(gene_id)) %>%
+        
+        ungroup()  %>% 
+        dplyr::select(everything()) 
+
+
+dim(geneID.map.anno)
+head(geneID.map.anno[,1:5])
+```
+
+48230 
+
+```{r}
+table(duplicated(geneID.map.anno$Gene))
+table(duplicated(geneID.map.anno$gene_id))
+```
+
+
+
+```{r}
+temp <- geneID.map.anno %>%
+  filter(duplicated(Gene) | duplicated(Gene, fromLast=TRUE))
+
+dim(temp)
+View(temp)
+```
+
+```{r}
+unique(temp$Gene)
+```
+
+###Annotate with ADC and Drug Target Information
+
+```{r }
+#This is from the ADC Targets file with A. Leonti edits, input into biomart. Loss of ~10 genes, but some were aliases. 
+ADC.targets_IDmap <- read.csv(file.path("ADC_and_Targets_Database_v2_rmDuplicates_12.23.19.csv"))
+
+
+# head(ADC.targets_IDmap)
+dim(ADC.targets_IDmap) #95 10
+```
+
+```{r}
+#This is from the ADC Targets file with A. Leonti edits 
+CART.targets_IDmap <- read.csv(file.path("CARTcell_and_Targets_Database_v1_rmDuplicates_12.23.19.csv"))
+
+
+# head(ADC.targets_IDmap)
+dim(CART.targets_IDmap) # 70  3
+```
+
+```{r eval=FALSE}
+setdiff(ADC.targets_IDmap$Gene.symbol.of.ADC.target..Final.,
+        Gene.IDmap$geneSymbol)
+
+setdiff(CART.targets_IDmap$Gene.symbol.of.CAR.T.cell.gene.target..Final.,
+        Gene.IDmap$geneSymbol)
+
+```
+
+
+
+
+
+```{r eval=FALSE}
+transcriptID.map.anno <- transcriptID.map %>% 
+  mutate(Has.ADC.Developed=ifelse(gene_name %in% ADC.targets_IDmap$Gene.symbol.of.ADC.target..Final.,
+                                  "Yes", ""),
+         Has.CART.Developed=ifelse(gene_name %in% CART.targets_IDmap$Gene.symbol.of.CAR.T.cell.gene.target..Final.,
+                                  "Yes", "")) %>% 
+  left_join(., rename_all(ADC.targets_IDmap,~paste0(., "_ADC")),
+                          by=c("gene_name"="Gene.symbol.of.ADC.target..Final._ADC")) %>% 
+  left_join(., rename_all(CART.targets_IDmap,~paste0(., "_CART")),
+                          by=c("gene_name"="Gene.symbol.of.CAR.T.cell.gene.target..Final._CART")) %>% 
+  select(gene_id:transcript_type,
+         matches("^Has."),
+         everything(),
+         -matches("havana|^tag|^ont"))
+
+# head(transcriptID.map.anno)
+```
+
+
+##Annotate with Human Protein Atlas
+
+Pathology:
+Staining profiles for proteins in human tumor tissue based on immunohistochemisty using tissue micro arrays and log-rank P value for Kaplan-Meier analysis of correlation between mRNA expression level and patient survival. The tab-separated file includes Ensembl gene identifier ("Gene"), gene name ("Gene name"), tumor name ("Cancer"), the number of patients annotated for different staining levels ("High", "Medium", "Low" & "Not detected") and log-rank p values for patient survival and mRNA correlation ("prognostic - favourable", "unprognostic - favourable", "prognostic - unfavourable", "unprognostic - unfavourable"). The data is based on The Human Protein Atlas version 19.1 and Ensembl version 92.38.
+
+```{r}
+pathology <- read.delim(file.path(PROJHOME,"/0000.00.02_Reference_GeneInfo/Human_Protein_Atlas_Pathology.tsv")) %>% 
+  filter(!is.na(prognostic...unfavourable) | !is.na(prognostic...favourable)) %>%
+  arrange(Gene) %>%
+  group_by(Gene) %>% 
+  mutate_at(vars(Cancer,High,Medium,Low,Not.detected),~paste(.,collapse = "; ")) %>% 
+  mutate(min_pval_unfavorable_outcome=ifelse(all(is.na(prognostic...unfavourable)), NA, 
+                                                 min(prognostic...unfavourable, na.rm=TRUE)), 
+         min_pval_favorable_outcome=ifelse(all(is.na(prognostic...favourable)), NA, 
+                                           min(prognostic...favourable, na.rm=TRUE))) %>%
+  ungroup() %>% 
+  select(Gene:Not.detected,min_pval_unfavorable_outcome,min_pval_favorable_outcome, -Gene.name) %>%
+  unique() %>%
+  rename_at(vars(High,Medium,Low,Not.detected), ~paste0("Number_Samples_with_",.,"Expression")) %>%
+  rename_all(~paste0(.,"_HumanProteinAtlas"))
+
+dim(pathology) #10,589     9
+head(pathology)
+```
+
+Subcellular location data:
+Subcellular location of proteins based on immunofluorescently stained cells. The tab-separated file includes the following columns: Ensembl gene identifier ("Gene"), name of gene ("Gene name"), gene reliability score ("Reliability"), enhanced locations ("Enhanced"), supported locations ("Supported"), Approved locations ("Approved"), uncertain locations ("Uncertain"), locations with single-cell variation in intensity ("Single-cell variation intensity"), locations with spatial single-cell variation ("Single-cell variation spatial"), locations with observed cell cycle dependency (type can be one or more of biological definition, custom data or correlation) ("Cell cycle dependency"), Gene Ontology Cellular Component term identifier ("GO id")
+The data is based on The Human Protein Atlas version 19.1 and Ensembl version 92.38.
+
+Reliability:
+Enhanced - One or several antibodies with non-overlapping epitopes targeting the same gene have obtained enhanced validation based on orthogonal or independent antibody validation method.
+Supported - Consistency with RNA-seq and/or protein/gene characterization data, in combination with similar staining pattern if independent antibodies are available.
+Approved - Consistency with RNA-seq data in combination with inconsistency with, or lack of, protein/gene characterization data. Alternatively, consistency with protein/gene characterization data in combination with inconsistency with RNA-seq data. If independent antibodies are available, the staining pattern is partly similar or dissimilar.
+Uncertain - Inconsistency with, or lack of, RNA-seq and/or protein/gene characterization data, in combination with dissimilar staining pattern if independent antibodies are available.
+
+```{r}
+subcellular <- read.delim(file.path(PROJHOME,"/0000.00.02_Reference_GeneInfo/Human_Protein_Atlas_subcellular_location.tsv")) %>% 
+  filter( Reliability != "Uncertain") %>% 
+  select(Gene,Main.location,Additional.location,Extracellular.location) %>%
+  rename_all(~paste0(.,"_HumanProteinAtlas"))
+
+
+dim(subcellular) #11,723    14
+head(subcellular[,1:4])
+```
+
+#Small Molecule Inhibitors/Drugs
+
+```{r}
+library(rDGIdb)
+#Identify small molecule inhibitors
+DGI_Filter <- queryDGIdb(pull(AMLGenes.stats,gene_name), 
+                             geneCategories = c("CLINICALLY ACTIONABLE")) 
+
+DGI_Final <- detailedResults(DGI_Filter) %>% 
+                  group_by(Gene) %>% 
+                  #collapse genes with multiple drugs into a single row
+                  mutate_at(vars(Drug:PMIDs),
+                            ~collapseRows(col = ., uniq = FALSE, sep="; ")) %>% 
+                  ungroup()  %>%
+                  dplyr::select(-SearchTerm) %>%
+                  unique()
+# View(DGI_Final)
+
+AMLGenes.stats <- AMLGenes.stats %>%
+  left_join(.,DGI_Final,by=c("gene_name"="Gene")) %>% 
+  left_join(., pathology, by=c("gene_id"="Gene_HumanProteinAtlas")) %>% 
+  left_join(., subcellular, by=c("gene_id"="Gene_HumanProteinAtlas"))
+
+  
+head(AMLGenes.stats)
+dim(AMLGenes.stats) #873  61
+# write.csv(AMLGenes.stats, "AML_Highly_Expressed_ProteinCoding_Genes_annotated_1.16.20.csv", row.names = FALSE)
+
+# AMLGenes.stats <- read.csv("AML_Highly_Expressed_ProteinCoding_Genes_annotated_1.16.20.csv")
+```
+
+```{r}
+AMLRestrictedGenes.TM <- AMLGenes.stats %>% 
+  dplyr::filter(Cellular.Compartment_Membrane != "" | 
+                  (grepl("Plasma membrane|Focal adhesion sites", Main.location_HumanProteinAtlas) | 
+                  grepl("Plasma membrane|Focal adhesion sites", Additional.location_HumanProteinAtlas))) %>% #keep only the TM/cell membrane genes
+  arrange(desc(Percent.Expressors_GT.5TPM_AML))  
+
+dim(AMLRestrictedGenes.TM) #524  61
+# head(AMLRestrictedGenes.TM, n=10)
+# write.csv(AMLRestrictedGenes.TM, "AML_Highly_Expressed_ProteinCoding_Genes_CellMembraneOnly__5TPMcutoff_3.24.20_.csv", row.names = FALSE)
+
+
+```
+
+```{r}
+AMLRestrictedGenes.Intra <- AMLGenes.stats %>% 
+  dplyr::filter(is.na(Cellular.Compartment_Membrane)) %>% 
+  filter(!grepl("Plasma membrane|Focal adhesion sites", Main.location_HumanProteinAtlas)) %>%
+  filter(!grepl("Plasma membrane|Focal adhesion sites", Additional.location_HumanProteinAtlas)) %>%
+  arrange(desc(Percent.Expressors_GT.5TPM_AML))
+
+dim(AMLRestrictedGenes.Intra) #349  61
+# head(AMLRestrictedGenes.Intra)
+# write.csv(AMLRestrictedGenes.Intra, "AML_Highly_Expressed_ProteinCoding_Genes_IntracellularOnly_5TPMcutoff_3.24.20.csv", row.names = FALSE)
+```
+
+
+##AML Restricted Within Subgroups
+
+```{r}
+AMLGenes.ByGroup <-  AMLGenes %>%
+  filter(gene_id %in% AMLGenes.stats$gene_id) %>%
+  mutate_at(vars(Groups), ~case_when(
+    grepl("CBFA2T3-GLIS2", Primary.Fusion.CNV) | grepl("CBFA2T3-GLIS2", Additional.Fusions.CNV) ~ "CBFA2T3-GLIS2",
+    grepl("NUP98-KDM5A", Primary.Fusion.CNV) | grepl("NUP98-KDM5A", Additional.Fusions.CNV) ~ "NUP98-KDM5A",
+    grepl("NUP98-NSD1", Primary.Fusion.CNV) | grepl("NUP98-NSD1", Additional.Fusions.CNV) ~ "NUP98-NSD1",
+    grepl("None", Primary.Fusion.CNV) ~ "No.Fusion.CNV",
+    TRUE ~ .)) %>%
+  group_by(gene_id,Groups) %>%
+  summarize(Number_Samples=n(),
+            Number.Expressors_GT.10TPM=sum(TPM >= 10.0),
+            Percent.Expressors_GT.10TPM=(sum(TPM >= 10.0)/n())*100) %>%
+  arrange(desc(Percent.Expressors_GT.10TPM)) %>%
+  ungroup() %>% 
+  # filter(Percent.Expressors_GT.10TPM > 10) %>%
+  inner_join(.,select(geneID.map.anno, gene_id,gene_name), by="gene_id") %>% 
+  select(gene_name,everything())
+
+
+head(AMLGenes.ByGroup, n=10) 
+dim(AMLGenes.ByGroup)
+
+# write.csv(AMLGenes.ByGroup, "AML_Restricted_Genes_bySubtype.csv", row.names = FALSE)
+```
+
+```{r}
+quantile(AMLGenes.ByGroup$Percent.Expressors_GT.10TPM)
+```
+
+```{r}
+Grant_Genes <- c("MSLN", "FOLR1", "CSPG4", "CRLF2", "CEACAM6", "CD70", "LAMP5", "CLEC2A","CLECL1") 
+
+KDM5A.targets <- filter(AMLGenes.ByGroup, Groups== "NUP98-KDM5A") %>% 
+  filter(gene_name %in% Grant_Genes)
+
+
+dim(KDM5A.targets)
+View(KDM5A.targets)
+# write.csv(KDM5A.targets, "TARGET_AML_resrticted_genes_NUP98-KDM5A_3.16.20.csv",
+#           row.names = FALSE)
+```
+
+
+##Create Short List of AML Restricted TM Genes
+
+```{r}
+quantile(AMLRestrictedGenes.TM$Fold_Change_AML_vs_Bulk_NBM,
+         probs=seq(0,1,length.out=11), na.rm=TRUE)
+quantile(AMLRestrictedGenes.TM$Fold_Change_AML_vs_CD34_NBM,
+         probs=seq(0,1,length.out=11), na.rm = TRUE)
+```
+
+```{r}
+NCAM1 = "ENSG00000149294"
+CD33 = "ENSG00000105383"
+GOI <- c("NCAM1","CD70","FOLR1","CLEC2A","MSLN","CSPG4","CRLF2","PRAME")
+```
+
+
+```{r}
+shortList <- AMLRestrictedGenes.TM %>% 
+  filter(!gene_id %in% c(CD33)) %>%
+  mutate(PlasmaMembrane_Potential=Cellular.Compartment_Membrane != "" |
+           grepl("Plasma membrane|Focal adhesion sites", Main.location_HumanProteinAtlas) |
+           grepl("Plasma membrane|Focal adhesion sites", Additional.location_HumanProteinAtlas)) %>%
+  filter(Percent.Expressors_GT.10TPM_AML >= 5.0 | (gene_name %in% GOI)) %>%
+  filter((gene_name %in% GOI) |
+           (Fold_Change_AML_vs_Bulk_NBM >= 2.8 & Fold_Change_AML_vs_CD34_NBM >= 8.0) |
+           (!is.na(Drug) | Has.ADC.Developed != "" | Has.CART.Developed != ""))
+
+
+dim(shortList) #28 TM genes
+# head(shortList)
+# tail(shortList)
+# View(shortList)
+# write.csv(shortList, "AML_Restricted_Genes_CellMembraneOnly_ShortList_J.Smith_12.31.19.csv")
+```
+
+```{r}
+table(shortList$PlasmaMembrane_Potential)
+quantile(shortList$Number.Expressors_GT.10TPM_AML)
+```
+
+```{r}
+shortList.ByGroup <- filter(AMLGenes.ByGroup, gene_id %in% shortList$gene_id)
+
+length(unique(shortList.ByGroup$gene_name))
+setdiff(shortList$gene_name,unique(shortList.ByGroup$gene_name)) 
+# unique(shortList.ByGroup$Groups)
+# View(shortList.ByGroup)
+
+# write.csv(shortList.ByGroup,"AML_Restricted_Genes_ShortList_bySubtype_J.Smith_12.31.19.csv")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

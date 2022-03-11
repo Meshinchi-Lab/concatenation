@@ -1,0 +1,294 @@
+---
+title: 'Concatenate TransAbyss Indels'
+author: "Jenny Smith"
+date: 'September 5, 2019'
+output: html_document
+---
+
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.width = 10, fig.height = 10)
+knitr::opts_knit$set(root.dir = '/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2018.02.05_cat_TransAbyss_data')
+options(stringsAsFactors = FALSE)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+library(tidyr)
+getwd()
+```
+
+```{r}
+source("~/scripts/conversion_scripts/Merge_Cat_FixDupIDs_Function.r")
+```
+
+
+
+#Read in the CDEs 
+
+CDE.0531 <- read.csv("~/reference_mapping-files/TARGET_AML_current_asof_june30_2016_UPDATED_CLEAN_4.19.18.csv")
+
+dim(CDE.0531) 
+head(CDE.0531[,1:5])
+
+```{r}
+merged <- read.csv("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/Clinical/CDE/Merged/TARGET_AML_0531_1031_merged_CDEs_9.4.19.csv")
+
+
+merged <- merged %>% 
+  filter(!is.na(USI))
+
+head(merged[,1:5])
+dim(merged)
+```
+
+
+#Read in the Manifest 
+
+```{r}
+manifest <- read.csv("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/SequencingDataMatrix/TARGET_AML_0531_1031_miRNAseq_Ribodepletion_mRNAseq_Manifest_v5.csv")
+
+head(manifest)
+dim(manifest)
+```
+
+
+#Select the Files for Merging 
+
+```{r}
+path="/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level2/indels/2017July_BCCA_0531_1031_TransAbyss_Illumina_data/"
+```
+
+```{r}
+allfiles <- dir(path = path,
+             pattern = ".tsv") #1575 files 
+
+libs <- gsub("^.+_(A[0-9]+)_.+", "\\1",  allfiles) %>%
+  unique() #1575 libs
+
+fileTypes <- gsub("^.+_A[0-9]+", "", allfiles) %>%
+  gsub("\\.tsv", "", .)
+
+tab <- table(fileTypes)
+tab
+```
+
+
+#Begin Merging the Fusion Data Sets
+
+```{r}
+head(allfiles)
+```
+
+
+```{r eval=FALSE}
+allfiles <-  paste0(path, allfiles)
+cated <- catRbind(allfiles,regex =  "^.+\\/([TKM].+)_A[0-9].+", header = TRUE)
+```
+
+
+```{r}
+length(unique(cated$Patient))
+head(cated)
+dim(cated)
+
+# write.csv(cated, "TARGET_AML_0531_1031_events_exons_novel_1.4.19.csv", row.names = FALSE)
+```
+
+```{r}
+# saveRDS(cated, "TARGET_AML_0531_1031_events_exons_novel_1.4.19.RDS")
+```
+
+
+#CBL Deletions
+
+CBL deletions occur in exon 8, exon 9, or both. It Overlaps with the CBF-AMLs. 
+Exon 8 del:          -132bp
+Exon 9 del:          -204bp
+Exon 8/9 del:      -336bp
+
+
+```{r}
+events <- readRDS("indels/TARGET_AML_0531_1031_events_exons_novel_1.4.19.RDS")
+
+head(events[,1:5])
+dim(events) #38,919,510       26
+```
+
+```{r}
+table(events$type)
+```
+
+```{r}
+CBL.del <- events %>% 
+  filter(grepl("^CBL:",gene)) #%>% 
+  # filter(grepl("exon7|exon8|exon9|exon10", gene)) # could come up as exon7 to exon10 junction
+
+
+dim(CBL.del) #106  26
+# table(CBL.del$gene)
+# write.csv(CBL.del, "indels/TARGET_AML_CBL_Events_Exons_Novel.csv", row.names = FALSE)
+```
+
+```{r}
+table(CBL.del$gene)
+```
+
+```{r}
+CBL.del %>% 
+  filter(len > 50 & len < 500) %>%
+  arrange(len)
+```
+
+```{r}
+head(CBL.del)
+```
+
+
+
+
+#CEPBA / FLT3 Indels
+
+```{r}
+CEBPA_molecular <- read.csv("CEPBA_IGV_Troubleshooting.csv")
+anno <- read.csv("CEBPA_anno.csv")
+
+
+head(CEBPA_molecular)
+dim(CEBPA_molecular)
+```
+
+
+```{r}
+CEBPA <- cated %>%
+  filter(grepl("^CEBPA:", gene))
+  
+
+dim(CEBPA) #6480   26
+head(CEBPA)
+```
+
+```{r}
+table(CEBPA$type)
+```
+
+```{r}
+CEBPA.dels <- CEBPA %>%
+  filter(grepl("del|ins", type), !grepl("^Kas|MV4",Patient)) %>%
+    mutate(Group=case_when(
+    grepl("BM[0-9]{4}|RO[0-9]{5}", Patient) ~ "NBM",
+    grepl("MPN[0-9]{3}", Patient) ~ "MPN",
+    grepl("sorted", Patient, ignore.case = TRUE) ~ "FlowSorted",
+    TRUE ~ "AML")) %>%
+  
+  
+  select(Patient,Group, 
+         matches("gene"),matches("type"), matches("^chr|len|ref|read"), 
+         -starts_with("ctg"), -at_least_1_read_opposite, -genome_reads, -repeat.length) %>%
+  mutate(USI=str_split_fixed(Patient,"-", n=4)[,3]) %>%
+  
+  arrange(Group,Patient,type,desc(event_reads), desc(len)) %>%
+  unique() 
+
+
+dim(CEBPA.dels) #5916   12
+head(CEBPA.dels, n=10)
+```
+
+
+```{r}
+CEBPA.dels.filt <- CEBPA.dels %>%
+  
+  group_by(Patient,type,gene) %>%
+  filter(event_reads == max(event_reads) & contig_reads == max(contig_reads)) %>%
+  ungroup() %>%
+  
+  left_join(., select(CDE.merged, USI, Reg.), by="USI")
+  
+dim(CEBPA.dels.filt) #2000   12
+head(CEBPA.dels.filt, n=40)
+
+# write.csv(check, "TARGET_AML_1031_CEBPA__TransAbyss_1.4.19.csv", row.names = FALSE)
+```
+
+
+```{r}
+CEBPA.dels %>%
+  filter(grepl("PAVKPK", Patient))
+```
+
+
+```{r}
+check <- CEBPA.dels %>%
+  inner_join(., CEBPA_molecular, by="USI") %>%
+  select(Patient,Reg., USI, Group,gene,type, everything(), -Found.in.IGV) #%>%
+  
+  #filter for bzip domain. to be comparable
+  # filter(chr_start >= 33792286 & chr_end < 33792477 )
+
+
+dim(check) #812
+
+# write.csv(check, "TARGET_AML_1031_CEBPA_Molecular_TransAbyss_NoFiltering_OnlyBzip_1.4.19.csv", row.names = FALSE)
+```
+
+Bzip-domain: 
+chr19:33792286-33792477
+
+Coding Region
+   Position: hg19 chr19:33,792,244-33,793,320
+   
+   
+   5' UTR start bc CEBPA is on negative strand, and IGV reports the positive strand is where the CDSs acutally starts- then bp go down (negative strand, minus) - and 3'UTR end is the end the CDs. 3' UTR start is 
+
+```{r}
+anno  %>%
+  select(Transcription.start.site..TSS., X3..UTR.end, X3..UTR.start, X5..UTR.end, X5..UTR.start,)
+```
+
+```{r}
+CEBPA.dels_withMol <- CEBPA.dels.filt %>%
+  filter(!is.na(Reg.)) %>%
+  inner_join(., select(CEBPA_molecular,-USI), by="Reg.") %>%
+  select(Patient,Reg., USI, Group,gene,type,, everything(), -Found.in.IGV) %>%
+  
+  mutate(Region=case_when(
+    chr_start >= 33792286 & chr_end <= 33792477  ~ "bZip",
+    
+    chr_start >= 33792244 & chr_end <= 33793320  ~ "CDS",
+    
+    chr_start == 33793470 ~ "TSS",
+    
+    chr_start >= 33790840 & chr_end <= 33792243 ~ "3' UTR",
+    
+    chr_start >= 33793321 & chr_end <= 33793470  ~ "5' UTR",
+    TRUE ~ ""))
+
+
+head(CEBPA.dels_withMol[,], n=50) # 227  16
+dim(CEBPA.dels_withMol)
+
+write.csv(CEBPA.dels_withMol, "TARGET_AML_1031_CEBPA_Molecular_TransAbyss_1.4.19.csv", row.names = FALSE)
+```
+
+
+
+```{r}
+table(CEBPA.dels_withMol$Region)
+length(unique(CEBPA$Patient)) #1222
+```
+
+
+
+
+#Session Information 
+
+```{r}
+sessionInfo()
+```
+

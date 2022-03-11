@@ -1,0 +1,287 @@
+---
+title: "Concatenate RNA-seq"
+author: "Jenny Smith"
+date: "Feb 7, 2020"
+output: html_document
+---
+
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 8, fig.width = 10)
+knitr::opts_knit$set(root.dir = '/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2017.02.14_BCCA_Aug2014_TPM_Conversion/')
+```
+
+```{r message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(reshape2)
+getwd()
+```
+
+```{r}
+source(file.path(SCRIPTS,"conversion_scripts/Merge_Cat_FixDupIDs_Function.r"))
+source(file.path(SCRIPTS,"RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/R/rmDupGenes_Function.r"))
+```
+
+
+#Define Functions to be used. 
+
+```{r}
+#Function for the TPM conversion. 
+# Based on https://groups.google.com/forum/#!topic/rsem-users/W9RQrZIOzA4
+#Useage: sapply(cated$RPKM, RPKM_to_TPM)
+
+RPKM_to_TPM <- function(RPKM){
+  conversionFactor <- sum(RPKM) / 1E6
+  TPM <- RPKM / conversionFactor
+  
+  
+  return(TPM)
+}
+```
+
+
+```{r}
+#https://stackoverflow.com/questions/32040742/dplyrselect-including-all-other-columns-at-end-of-new-data-frame-or-beginni
+
+addCols <- function(df,symbol,id){
+  library(dplyr)
+  
+  df <- df %>%
+    as.data.frame() %>%
+    mutate(geneSymbol=symbol,
+           gene_id=id) %>%
+    select(geneSymbol, gene_id, everything())
+  
+  return(df)
+}
+```
+
+
+
+#Identify Files to Be Concatenated
+
+```{r}
+filepath <-  "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level3/gene/2016Apr_BCCA_0531_LowDepth_Illumina_data/"
+
+allfiles <- paste0(filepath, dir(path = filepath, 
+                pattern = ".transcript.normalized"))
+
+head(allfiles)
+length(allfiles) #494
+```
+
+
+
+#Columns Description
+
+_the .transcript.normalized file contains:_
+- *column 1*: gene id
+- column 2: transcript id or "merged_<gene_id>" if the analysis was performed in
+collapse mode
+- colomn 3: chromosome
+- column 4: start of the transcript (relative to the positive strand, so
+                                     start<end)
+- column 5: end of the transcript (relative to the positive strand, so start<end)
+- column 6: strand of the annotation ("+" or "-")
+- column 7: sum of the length of all exons in this transcript or collapsed gene
+- column 8: sum of the length of all introns in this transcript or collapsed gene
+- *column 9*: number of fractional reads inside this merged_gene or transcript's
+exons (sum of the fraction of each read inside all exons)
+- column 10: total coverage across all the exons in this merged_gene or transcript
+(sum of the coverage depth at each base in all exons)
+- column 11: number of fractional reads inside this merged_gene or transcript's
+introns (sum of the fraction of each read inside all introns)
+- column 12: total coverage across all the introns in this merged_gene or
+transcript (sum of the coverage depth at each base in all introns)
+- column 13: average coverage over all exons -- sum of the coverage depth at each
+base in all exons divided by the sum of the exon lengths)
+- column 14: average coverage over all introns and exons -- sum of the coverage
+depth at each base between the merged_gene or transcript's start and end
+divided by the number of bases between the gene's start and end
+- *column 15*: normalized coverage (RPKM) -- (number of fractional reads in all exons
+                                              in this merged gene or transcript x 1000000000)/(NORM_TOTAL x sum of the
+                                                                                               length of all exons in this merged gene or transcript)
+- *column 16*: gene symbol (or gene id if symbol is unavailable)
+- column 17: biotype (or "-" if biotype unavailable)
+- column 18: gene description (or "-" if description is unavailable)
+
+
+
+
+
+#Begin Concatenation 
+
+```{r}
+#Pattern to select the Target Barcode
+pattern <- "^.+\\/(T.+)-stranded.+"
+
+```
+
+```{r}
+#Select the column indices 
+selected <- c(16,9,15)
+```
+
+```{r}
+cated <- catExpnData(filenames = allfiles, 
+                     regex = pattern, 
+                     cols = selected, 
+                     header = FALSE, 
+                     removeFirstLine = FALSE)
+names(cated) <- c("geneSymbol", "FractionalCounts", "RPKM")
+sapply(cated, dim)
+```
+
+```{r}
+lapply(cated, function(x) head(x[,1:5]))
+```
+
+
+#Convert RPKM to TPM 
+
+```{r}
+options(scipen = 999)
+cated[["TPM"]] <- apply(cated$RPKM,2,RPKM_to_TPM)
+
+head(cated$TPM[,1:5])
+```
+
+```{r}
+table(apply(cated$TPM, 2, sum)) #all sum to 1 million
+```
+
+
+#Check that the Gene Ids are in the Same Order
+
+```{r}
+all(apply(cated$geneSymbol, 2, function(x) identical(x=x, y=cated$geneSymbol[,1]))) #all are identical order. 
+```
+
+
+#Add columns for the Gene Symbol and Ensembl Symbol 
+
+
+```{r}
+toAddCols <- c("FractionalCounts", "RPKM", "TPM")
+
+withCols <- lapply(cated[toAddCols], function(x) addCols(df = x, symbol = cated$geneSymbol[,1], id = cated$geneSymbol[,1])[,-2])
+
+lapply(withCols, function(x) head(x[,1:5]))
+sapply(withCols, dim)
+```
+
+
+#Save the output
+
+```{r}
+data.types=names(withCols)
+for (i in 1:3){
+    f <- withCols[[i]] %>%
+      select(geneSymbol,matches("BM[0-9]"), everything())
+    
+    filename <- paste0("TARGET_AML_0531_ployA_RNAseq_",data.types[i],".csv")
+    write.csv(f, filename, row.names = FALSE)
+}
+
+```
+
+
+#Add in Stella 
+
+```{r}
+S.N <- read.delim("~/RNA_seq_Analysis/2018.03.21_CBF-GLIS_DEGs_Comprehensive/Stella/summary.Ranalysis.txt",
+                  sep="\t", header=TRUE, stringsAsFactors = FALSE)
+# head(S.N)
+```
+
+```{r}
+S.N <- S.N %>% 
+  mutate(TPM=RPKM_to_TPM(A76822_stranded_exp))
+
+head(S.N[,1:5])  
+# sum(S.N$TPM)
+```
+
+```{r}
+# TPM <- read.csv("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2017.10.09_Concatenate_1031_RNAseq/geneLevel/TARGET_AML_0531_1031_Ribodepleted_RNAseq_TPM.csv", 
+#                 stringsAsFactors = FALSE)
+
+
+head(withCols$TPM[,1:5])
+dim(withCols$TPM) #58450  1576
+```
+
+```{r}
+TPM.mrg <- withCols$TPM %>%
+  inner_join(., select(S.N, ID, TPM), by=c("gene_id"="ID")) %>%
+  select(geneSymbol, gene_id, everything(), S.1327=TPM)
+
+dim(TPM.mrg)
+```
+
+```{r}
+head(TPM.mrg[,c(1:2,1575:1577)])
+# write.csv(TPM.mrg, "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2017.10.09_Concatenate_1031_RNAseq/geneLevel/TARGET_AML_0531_1031_withStella_RNASeq_TPM.csv")
+```
+
+
+#Remove Duplicates
+
+```{r}
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/rmDupGenes_Function.r")
+```
+
+```{r}
+rmDups <- list()
+for (i in 1:3){
+  name <- names(withCols)[i]
+  expn <- withCols[[name]][,-2] #remove the ensemble IDs
+  
+  expn.rmDups <- rmDupGenes(expnData = expn, geneCol = "geneSymbol")
+  rmDups[[name]] <- expn.rmDups$remDups
+}
+```
+
+```{r}
+lapply(rmDups, function(x) head(x[,1:5]))
+# sapply(rmDups, dim) #51,573 by 1574
+```
+
+```{r}
+data.types=names(rmDups)
+for (i in 1:3){
+    
+    f <- rmDups[[i]]
+    samp <- colnames(f)
+    order <- c(grep("Kas|MV4", samp), 
+               grep("MPN[0-9]", samp), 
+               grep("sorted", samp, ignore.case = TRUE),
+               grep("BM[0-9]|RO[0-9]", samp), 
+               grep("TARGET-20-[PS][A-Z]{5}-0[39]A", samp))
+    f <- f[,order]
+    
+    filename <- paste0("TARGET_AML_0531_1031_Ribodepleted_RNAseq_dupGenesRemoved_",data.types[i],".csv")
+    # write.csv(f, paste0("~/RNA_seq_Analysis/0000.00.03_Expression_Matrices/",filename), row.names = FALSE)
+}
+```
+
+
+
+
+NOTE:
+
+If markdown cannot be completed with pandoc (memory issues), use the following
+
+> library("rmarkdown")
+> render("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/TARGET_AML_1031_Cat_RNAseq.Rmd", "html_document")
+
+
+#Session Info
+
+```{r}
+sessionInfo()
+```
+

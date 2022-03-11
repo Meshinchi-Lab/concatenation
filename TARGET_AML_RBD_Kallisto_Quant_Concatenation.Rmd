@@ -1,0 +1,1276 @@
+---
+title: "Concatenate Ribodepleted RNAseq counts from Kallisto Quant"
+author: "Jenny Smith"
+date: "March 4, 2019"
+output: html_document
+---
+
+#Set-up
+
+```{r setup}
+library(knitr)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME, "2017.10.09_Concatenate_1031_RNAseq"))
+
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 8, fig.width = 10)
+# knitr::opts_knit$set(root.dir = file.path(SCRATCH, 'jlsmith3/Kallisto/'))
+options(stringsAsFactors = FALSE)
+```
+
+```{r}
+library(tximport)# lib.loc = "/home/jlsmith3/R/x86_64-pc-linux-gnu-library/3.5")
+library(rhdf5)
+library(readr)
+
+library(edgeR)
+library(limma)
+library(RColorBrewer)
+library(stringr)
+library(dplyr)
+library(tibble)
+library(magrittr)
+
+
+source(file.path(SCRIPTS, "conversion_scripts/GTF_to_IDmap_Function.r"))
+```
+
+
+#Define Functions
+
+```{r}
+kallisto_rmDups <- function(kallisto.df, geneIDmap){
+        
+      #Fix the PAR regions. Need to sum them since the fasta sequence is identical between PAR_Y and the X chromosome gene 
+        PAR <- filter(geneIDmap, grepl("_PAR_Y", gene_id))
+        PAR <- PAR %>% 
+          pull(gene_id) %>% 
+          gsub("_PAR_Y", "", .) %>% 
+          paste(., collapse="|")
+        
+        #For each PAR region, use ColSums to combine them 
+        idx <- grep(PAR, rownames(kallisto.df), value=TRUE) 
+        length(idx) #90 PAR_Y and their X-chromosome pair
+        
+        pairs <- lapply(seq(2, length(idx), by=2), 
+                        function(x){ 
+                          rows <- idx[c((x-1):x)]
+                          colSums(kallisto.df[rows,])
+                        }) %>% 
+          do.call(rbind, .)
+        
+        #Remove the PAR_Y rows and add in the summed gene expression
+        non_PAR <- idx[seq(2, length(idx), by=2)-1]
+        kallisto.df <- kallisto.df[!grepl("_PAR_Y$", rownames(kallisto.df)), ]
+        kallisto.df[non_PAR,] <- pairs
+
+
+        # dim(kallisto.df) #59808  2116
+        # head(kallisto.df[,1:5])
+
+        #convert Ensembl IDs to Gene Symbols
+        kallisto.df.sym <- as.data.frame(kallisto.df) %>%
+          rownames_to_column("gene_id") %>%
+          left_join(., select(geneIDmap,gene_id,gene_name),
+                    by="gene_id") %>%
+          select(gene_id,gene_name, everything())
+
+        #seperate out those genes without duplicate symbols
+        kallisto.df.sym_noDups <- kallisto.df.sym %>%
+          filter(!duplicated(gene_name), !duplicated(gene_name, fromLast = TRUE))
+
+        #identify which columns are numeric counts columns
+        numeric_cols <- sapply(kallisto.df.sym, function(x) is.numeric(x))
+        numeric_cols <- names(numeric_cols)[which(numeric_cols)]
+
+        #calculate the averate for all duplicate gene symbols.
+        kallisto.df.sym_Dups <- kallisto.df.sym %>%
+          filter(duplicated(gene_name) | duplicated(gene_name, fromLast = TRUE)) %>%
+          arrange(gene_name) %>%
+
+          #Calculate IQR to measure variance
+          rowwise() %>%
+          mutate(IQR=IQR(c_across(all_of(numeric_cols)))) %>%
+          ungroup() %>%
+
+          #use the max IQR expression to address duplicate gene symbols
+          group_by(gene_name) %>%
+          mutate(Rank=rank(IQR,ties.method= "first")) %>%
+          mutate(Keep=ifelse(Rank==max(Rank), TRUE, FALSE)) %>%
+          ungroup() %>%
+          select(IQR:Keep, everything())
+
+        # head(kallisto.df.sym_Dups[,1:10])
+        # dim(kallisto.df.sym_Dups) #1719 2118
+
+        #remove duplicated gene_names
+        kallisto.df.sym_rmDups <- kallisto.df.sym_Dups %>%
+          filter(Keep) %>%
+          select(-IQR,-Keep, -Rank)
+
+        #
+        # dim(kallisto.df.sym_rmDups) #174 2118
+        # head(kallisto.df.sym_rmDups)
+
+        kallisto.df.sym_final <- bind_rows(kallisto.df.sym_noDups, kallisto.df.sym_rmDups)
+
+        # dim(kallisto.df.sym_final) #58263  2118
+        # head(kallisto.df.sym_final[,1:5])
+}
+
+```
+
+
+# Download the Data
+NOTE: 
+
+The working directory is kallisto on scratch/, whcih is temporary storage and will be deleted in 90 days. The way to reproduce this code is to re-download files from AWS s3 bucket. 
+
+Will add code-snippet here. Possible to do this through R client as well, but I did it using aws command line interface. 
+
+
+```{bash, eval=FALSE}
+
+ml awscli 
+cd /fh/scratch/delete90/meshinchi_s/jlsmith3/kallisto/Relapse
+BUCKET="s3://fh-pi-meshinchi-s"
+aws s3 cp --only-show-errors --recursive  --exclude "*" --include "*.h5" --include "*.json"  $BUCKET/SR/kallisto_out/Batch12/ .
+```
+
+
+
+res=$(aws s3 ls --recursive $BUCKET/SR/kallisto_out/ )
+
+h5=$(echo "$res" | sed -E 's/ {2,}/ /' | grep -E ".h5" | cut -f 4 -d " " )
+
+--loop to copy all h5 abundance files to the current working directory
+for path in $(echo "$h5" | head); 
+do IFS='/' read -ra SEGS <<< "$path";    
+  samp=${SEGS[2]}_${SEGS[3]}; 
+  echo $samp 
+  aws s3 cp $BUCKET/$path $PWD/$samp; 
+done 
+
+
+--bash code for moving the abundance.h5 files into individual directories.
+for file in $(ls -1 *.h5) ;
+do samp=${file/_abundance.h5/};
+  mkdir -p $samp ; 
+  mv $file $samp/abundance.h5 ; 
+done
+
+
+
+
+The tximport package will not interpret the .h5 files as hdf5 format when named anything other than abundance.h5, which is quirky to say the least. 
+
+So I used my download script to rename the abundance.h5 files with thier sample ID and then had to create a nested directory structure that kallisto output uses natively. This of course works on unix systems, but AWS S3 buckets do not have directories, so each URL is for a single object (file). So downloading from s3 to unix directory loses all structure. 
+
+
+
+
+
+#Read in the manifest file
+
+```{r}
+manifest <- read.csv(file.path(TARGET,"SequencingDataMatrix/00_archive/TARGET_AML_RBD_0531_1031_miRNAseq_mRNAseq_Manifest_v5.csv")) %>% 
+  mutate(Sample=gsub("-","\\.", Final_Patient_ID)) %>%
+  mutate(Sample=ifelse(Replicate == "Replicate",
+                       paste0(Sample,"_Replicate"), Sample),
+         Batch=paste0("dx",Batch)) %>%
+  filter(!grepl("(PATGIG|PATISD).+Replicate", Sample)) %>%
+  filter(!is.na(mRNAseq_coverage.transcript.normalized)) %>%
+  select(everything(), Group=Type)  %>%
+  arrange(PATIENT_ID_Original)
+
+head(manifest[,1:5])
+dim(manifest)
+table(manifest$Group, useNA='ifany')
+# sum(manifest$Sample %in% colnames(kcts_dx)) #1573
+# setdiff(manifest$Sample, colnames(kcts_dx)) # "TARGET.20.PAWZVT.09A.01R" find this one
+# setdiff(colnames(kcts_dx), manifest$Sample) #stella
+```
+
+```{r}
+sheet <- read.delim(file.path(SCRIPTS,"batch_pipeline/sample_sheets/picard_fq2_sample_sheet.txt"),
+                              sep="\t", header = FALSE) %>% 
+  mutate(PATIENT_ID=str_split_fixed(V1,"_", 2)[,1]) %>%
+  filter(PATIENT_ID %in% manifest$PATIENT_ID_Original) %>%
+  filter(grepl("^TARGET.+_RBS_.+" , V1) | !grepl("^TARGET", PATIENT_ID)) %>%
+  select(-PATIENT_ID) %>%
+  set_colnames(c("Sample","R1", "R2"))
+
+
+dim(sheet)
+# write.table(sheet,"~/scripts/batch_pipeline/sample_sheets/RBD_batch1_batch2_sample_sheet.txt",sep="\t", quote=FALSE, row.names=FALSE)
+
+```
+
+
+
+# Define Kallisto quant files 
+
+```{r}
+getwd()
+```
+
+```{r}
+path <- paste0(getwd(),"/CD34_PB")
+
+hdf5 <- dir(path=path, 
+            pattern = "*.h5",recursive = TRUE)
+
+head(hdf5)
+length(hdf5) #1573
+```
+
+```{r}
+patient.IDs <- data.frame(filepath=path,
+                          filename=hdf5) %>% 
+  
+  mutate(TARGET.Barcode=str_split_fixed(filename, 
+                                        pattern = "_", n=6)[,1], 
+         Lib_Prep=str_split_fixed(filename,
+                                  pattern = "_", n=6)[,2]) %>%
+  
+  mutate_at(vars(Lib_Prep),~ifelse(. != "RBS", NA, .)) %>% 
+  mutate_at(vars(Lib_Prep),~case_when(
+    is.na(.) & grepl("^[BPRSKM]|R00", TARGET.Barcode) ~ "RBS", 
+    is.na(.) & grepl("^TARGET", TARGET.Barcode) ~ "PolyA", 
+    TRUE ~ .)) %>% 
+  
+ mutate(Final_Colname=ifelse(Lib_Prep=="RBS", TARGET.Barcode,
+                              paste(TARGET.Barcode, Lib_Prep, sep="_"))) 
+  
+  # #filter PATGIG and PATISD replicates- they were not processed on S3/Batch.
+  # left_join(., filter(manifest, 
+  #                     !(grepl("PATGIG|PATISD", USI) & grepl("Replicate", Replicate))),
+  #           by=c("Final_Colname"="PATIENT_ID_Original")) %>%
+  # 
+  # mutate_at(vars(Final_Colname), ~case_when(
+  #   grepl("RBS", Lib_Prep) ~  gsub("_none|_Original", "",
+  #                                  paste(Final_Patient_ID, Lib_Prep, Replicate, sep="_")), 
+  #   grepl("PolyA", .) & grepl("Replicate", filename) ~ paste(., "Replicate", sep="_"),
+  #   TRUE ~ . )) %>% 
+  # arrange(Final_Colname) %>% 
+  # dplyr::select(filepath,filename, PATIENT_ID_Original=TARGET.Barcode, Lib_Prep, Final_Colname) 
+ 
+
+head(patient.IDs)
+dim(patient.IDs)
+
+# write.csv(patient.IDs, "Kallisto_Quant_Gencode_v29_RepBase_v24.01_Sample_IDmap.csv",row.names = FALSE)
+```
+
+
+
+#Create a Gene to Transcript ID Map 
+
+https://www.gencodegenes.org/human/stats.html
+
+```{r}
+IDmap <- read.csv(file.path(HOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_Gene_IDmap.csv"))
+
+head(IDmap)
+dim(IDmap) #207826     22
+```
+
+
+```{r eval=FALSE}
+gtf <- read.delim("/fh/fast/meshinchi_s/workingDir/TARGET/Reference_Data/GRCh38/gtf/gencode.v29.annotation.gtf", 
+                  header = FALSE, sep = "\t",
+                  quote = "\"", dec = ".", fill = TRUE, comment.char = "#")
+
+
+# head(gtf)
+dim(gtf) # 2,742,017 by 9
+```
+
+```{bash eval=FALSE}
+#See this github gist for re-creating the repbase_IDs.txt.  #https://gist.github.com/jennylsmith/97e49c8f8005ca49ed333a19586ca756
+#However, there is a limit and you CANNOT download these again without a subscription.
+
+zcat "/fh/fast/meshinchi_s/workingDir/TARGET/Reference_Data/GRCh38/fasta/cdna/gencode.v29_RepBase.v24.01.fasta.gz" | grep -E "^>" | grep -E -v "^>ENST[0-9]" | sed -E 's/^>//' > repbase_IDs.txt
+```
+
+```{r eval=FALSE}
+repbase <- read.delim("repbase_IDs.txt", sep = "\t", header = FALSE)
+
+head(repbase)
+dim(repbase) # 1132    3
+
+IDmap <- getIDmap(gtf)
+
+head(IDmap)
+dim(IDmap) #206,694 transcripts.  same # transcripts listed online in the stats page of gencode v29
+
+IDmap <- IDmap %>% 
+  #add the repbase transposable elements 
+  add_row(gene_id=repbase$V1,
+          transcript_id=repbase$V1, 
+          gene_name=repbase$V1,
+          transcript_name=repbase$V1, 
+          gene_type="transposable element", 
+          transcript_type="transposable element")
+
+dim(IDmap) #207,826 transcripts. Same as gencode.v29_RepBase.v24.01.fasta which was used for kallisto index.
+head(IDmap)
+
+
+# write.csv(IDmap, "~/RNA_seq_Analysis/0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_Gene_IDmap.csv", row.names = FALSE)
+```
+
+This number is also the same as the abundance.tsv rows. 
+
+```{r}
+check <- read.delim("abundance.tsv", sep="\t", header = TRUE)
+head(check)
+tail(check)
+# dim(check) #207826      5
+```
+
+
+
+#TXimport with the HDF5 files
+
+
+https://wurmlab.github.io/genomicscourse/2016-SIB/practicals/rnaseq/TP2
+For this purpose, they introduced the "scaledTPM" values, which are obtained by summing the transcript-level TPMs by gene, and multiplying them with the total library size in millions. 
+
+ScaledTPM values are artificial values, transforming underlying abundance measures to the scale of read counts. This allows to incorporate the information provided by the sequencing depth, and work with RNA-seq differential expression tools that were developed to use read counts. 
+
+
+countsFromAbundance:
+character, either "no" (default), "scaledTPM", or "lengthScaledTPM", for whether to generate estimated counts using abundance estimates scaled up to library size (scaledTPM) or additionally scaled using the average transcript length over samples and the library size (lengthScaledTPM). if using scaledTPM or lengthScaledTPM, then the counts are no longer correlated with average transcript length, and so the length offset matrix should not be used.
+
+```{r}
+library(rslurm)
+```
+
+
+```{r}
+files <- paste(patient.IDs$filepath, patient.IDs$filename, sep="/") %>% 
+  set_names(patient.IDs$Final_Colname)
+
+tx2gene <- dplyr::select(IDmap, transcript_id, gene_id)
+
+sopt <- list('nodes'='1', 'cpus-per-task'='4',
+             'partition'='campus-new', 'mem'='62G',
+             'time' = '24:00:00', 'mail-type'='FAIL',
+             'mail-user'='jlsmith3@fredhutch.org') 
+
+```
+
+```{r}
+txi.geneLevel.job <- slurm_call(f=tximport,
+                     jobname = "tximport_DESeq2_CD34_Gene",
+                     params =  list(files = files,
+                                    type="kallisto", 
+                                    tx2gene = tx2gene, 
+                                    txIn = TRUE,
+                                    txOut = FALSE,
+                                    ignoreAfterBar = TRUE, 
+                                    dropInfReps= FALSE,
+                                    countsFromAbundance = "no"),
+                     add_objects = c("files","tx2gene"), #use global_objects instead
+                     slurm_options=sopt,
+                     submit = TRUE) #Submitted batch job 33969960
+
+# str(txi.geneLevel.job)
+```
+
+```{r}
+txi.txLevel.job <- slurm_call(f=tximport,
+                     jobname = "tximport_Tx",
+                     params =  list(files = files,
+                                    type="kallisto", 
+                                    tx2gene = tx2gene, 
+                                    txIn = TRUE,
+                                    txOut = TRUE,
+                                    ignoreAfterBar = TRUE, 
+                                    dropInfReps= FALSE,
+                                    countsFromAbundance = "scaledTPM"),
+                     add_objects = c("files","tx2gene"),
+                     slurm_options=sopt,
+                     submit = TRUE) #Submitted batch job  33969961
+
+
+# str(txi.txLevel.job) 
+```
+
+
+## read in the results of tximport 
+
+##gene Level
+
+```{r}
+sample_info <- read.csv(file.path(TARGET, "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_02.04.21.csv"))
+
+dim(sample_info)
+
+geneIDmap <- read.csv(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_GeneLevel_IDmap_anno_11.06.20.csv"),
+                      row.names = 1) %>% 
+  set_rownames(.$gene_id)
+
+head(geneIDmap)
+```
+
+```{r}
+
+# txi.geneLevel <- readRDS(file.path(PROJHOME,"2017.10.09_Concatenate_1031_RNAseq/transcriptLevel/TARGET_AML_RBD_batch12_tximport.RDS"))
+txi.geneLevel <- readRDS("_rslurm_tximport_DESeq2_CD34_Gene/results_0.RDS")
+txi.geneLevel$countsFromAbundance
+
+# txi.geneLevel.b12 <- readRDS(file.path(PROJHOME,"2018.02.12_AML_Specific_Transcripts/Expression_Data/TARGET_AML_RBD_batch12_DESeq2_tximport.RDS"))
+
+# saveRDS(txi.geneLevel,file.path(PROJHOME,"2018.02.12_AML_Specific_Transcripts/Expression_Data/TARGET_AML_RBD_batch12_DESeq2_tximport.RDS"))
+# saveRDS(txi.geneLevel,file.path(PROJHOME,"2017.10.09_Concatenate_1031_RNAseq/transcriptLevel/TARGET_AML_RBD_batch12_tximport.RDS"))
+```
+
+```{r}
+#the column identifiers are really the "PATIENT_ID_Original" so need to be updated
+identical(colnames(txi.geneLevel$counts), colnames(txi.geneLevel$abundance))
+identical(rownames(txi.geneLevel$counts), rownames(txi.geneLevel$abundance))
+
+identical(rownames(txi.geneLevel$counts), rownames(txi.geneLevel.b12$counts)) #TRUE
+identical(rownames(txi.geneLevel$abundance), rownames(txi.geneLevel.b12$abundance)) #TRUE
+
+idx <- c("abundance","counts", "length")
+txi.geneLevel.comb <- lapply(idx, function(i) bind_cols(as.data.frame(txi.geneLevel.b12[[i]]),
+                                                        as.data.frame(txi.geneLevel[[i]])))
+names(txi.geneLevel.comb) <- idx
+
+
+newColnames <- gsub("_RBS","", colnames(txi.geneLevel.comb$counts)) %>% 
+  gsub("_Replicate","_replicate", .) %>% 
+  gsub("-|\\+", "\\.", .) %>% 
+  ifelse(grepl("TARGET.20.PATGIG.03A.01R|TARGET.20.PATISD.09A.01R", .), paste0(.,"_replicate"), .)
+
+table(newColnames %in% sample_info$Sample) #TRUE
+newRownames <- gsub("\\.[0-9]{1,2}", "", rownames(txi.geneLevel.comb$counts))
+```
+
+```{r}
+colnames(txi.geneLevel.comb$counts) <- newColnames
+colnames(txi.geneLevel.comb$abundance) <- newColnames
+colnames(txi.geneLevel.comb$length) <- newColnames
+
+rownames(txi.geneLevel.comb$counts) <- newRownames
+rownames(txi.geneLevel.comb$abundance) <- newRownames
+rownames(txi.geneLevel.comb$length) <- newRownames
+
+
+lapply(txi.geneLevel.comb[idx], function(x) head(x[1000:1100,1:10]))
+lapply(txi.geneLevel.comb[idx], function(x) tail(x[1000:1100,1:10]))
+
+sapply(txi.geneLevel.comb[idx], dim)
+
+# saveRDS(txi.geneLevel.comb, file.path(PROJHOME,"2018.02.12_AML_Specific_Transcripts/Expression_Data/TARGET_AML_RBD_batch12_CD34PB_DESeq2_tximport.RDS"))
+```
+
+
+```{r}
+rmDups_dfs <- lapply(txi.geneLevel.comb[idx[1:2]], function(df){
+  kallisto_rmDups(kallisto.df = df, geneIDmap = geneIDmap)
+})
+
+
+# lapply(rmDups_dfs, dim)
+# lapply(rmDups_dfs,function(x) head(x[,1:5]))
+
+# lapply(names(rmDups_dfs), function(x) {
+#  file_name <- paste0("2018.02.12_AML_Specific_Transcripts/Expression_Data/TARGET_AML_RBD_0531_1031_CD34PB_Kallisto_Quant_GeneLevel_dupGenesRemoved_DESeq2_", x,".RDS")
+#  saveRDS(rmDups_dfs[[x]], file.path(PROJHOME,file_name))
+# })
+```
+
+```{r}
+# write.csv(txi.geneLevel$abundance,file.path(PROJHOME,
+#           "2017.10.09_Concatenate_1031_RNAseq/transcriptLevel/TARGET_AML_RBD_0531_1031_Kallisto_Quant_GeneLevel_Abundance_TPM.csv"),row.names = TRUE)
+# 
+# write.csv(txi.geneLevel$counts,file.path(PROJHOME,
+#           "2017.10.09_Concatenate_1031_RNAseq/transcriptLevel/TARGET_AML_RBD_0531_1031_Kallisto_Quant_GeneLevel_scaledTPM_counts.csv"),row.names = TRUE)
+# 
+# write.csv(txi.geneLevel$length,file.path(PROJHOME,
+#           "2017.10.09_Concatenate_1031_RNAseq/transcriptLevel/TARGET_AML_RBD_0531_1031_Kallisto_Quant_GeneLevel_Length.csv"),row.names = TRUE)
+# 
+# 
+# saveRDS(txi.geneLevel$abundance,file.path(PROJHOME,
+#           "2017.10.09_Concatenate_1031_RNAseq/transcriptLevel/TARGET_AML_RBD_0531_1031_Kallisto_Quant_GeneLevel_Abundance_TPM.RDS"))
+# 
+# saveRDS(txi.geneLevel$counts,file.path(PROJHOME,
+#           "2017.10.09_Concatenate_1031_RNAseq/transcriptLevel/TARGET_AML_RBD_0531_1031_Kallisto_Quant_GeneLevel_scaledTPM_counts.RDS"))
+# 
+# saveRDS(txi.geneLevel$length,file.path(PROJHOME,
+#           "2017.10.09_Concatenate_1031_RNAseq/transcriptLevel/TARGET_AML_RBD_0531_1031_Kallisto_Quant_GeneLevel_Length.RDS"))
+```
+
+
+
+
+### Merge batch 1/2 and Relapse Counts
+
+```{r}
+sample_info <- read.csv(file.path(TARGET, "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_10.08.20.csv"))
+
+dim(sample_info)
+```
+
+```{r}
+geneIDmap <- read.csv(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_GeneLevel_IDmap_anno_11.06.20.csv"),
+                      row.names = 1) %>% 
+  set_rownames(.$gene_id)
+
+head(geneIDmap)
+# dim(geneIDmap) #59853    33
+# filter(geneIDmap, grepl("MECOM|PRDM16", gene_name))
+# table(duplicated(geneIDmap$gene_name))
+```
+
+
+#### Raw Counts
+
+```{r}
+kallisto.cts <- readRDS(file.path(PROJHOME,"2017.10.09_Concatenate_1031_RNAseq/transcriptLevel/TARGET_AML_RBD_0531_1031_Kallisto_Quant_GeneLevel_scaledTPM_counts.RDS"))
+
+#the column identifiers are really the "PATIENT_ID_Original" so need to be updated
+newColnames <- gsub("_RBS","", colnames(kallisto.cts)) %>% 
+  gsub("_Replicate","_replicate", .) %>% 
+  gsub("-|\\+", "\\.", .) %>% 
+  ifelse(grepl("TARGET.20.PATGIG.03A.01R|TARGET.20.PATISD.09A.01R", .), paste0(.,"_replicate"), .)
+
+# newColnames
+# table(newColnames %in% sample_info$Sample) #all TRUE
+# any(duplicated(newColnames)) #FALSE
+
+
+colnames(kallisto.cts) <- newColnames
+rownames(kallisto.cts) <- gsub("\\.[0-9]{1,2}", "", rownames(kallisto.cts))
+
+dim(kallisto.cts) #59853  1573
+head(kallisto.cts[,1:5])
+```
+
+```{r}
+kallisto_rlps.cts <- readRDS(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/TARGET_AML_RBD_Relapse_Kallisto_Quant_GeneLevel_scaledTPM_counts.RDS"))
+
+
+rlps_Colnames <- gsub("_RBS", "", colnames(kallisto_rlps.cts)) %>%
+  gsub("_Replicate","_replicate", .) %>% 
+  gsub("-", "\\.", .) %>% 
+  ifelse(grepl("R0[09]", .), paste0("TARGET.00.", .), .) %>% 
+  ifelse(!grepl("R0[09]", .), paste0("TARGET.20.", .), .) %>% 
+  #PAVNUW was supposed to be a replicate but the original sample failed sequencing. 
+  ifelse(grepl("TARGET.20.PAVNUW.03A.01R_replicate", .), gsub("_rep.+$", "", .), .)
+  
+
+# table(rlps_Colnames %in% sample_info$Sample) #TRUE
+# any(rlps_Colnames %in% colnames(kallisto.cts)) #FALSE
+# any(duplicated(rlps_Colnames)) #FALSE
+
+
+colnames(kallisto_rlps.cts) <- rlps_Colnames
+rownames(kallisto_rlps.cts) <- gsub("\\.[0-9]{1,2}", "", rownames(kallisto_rlps.cts))
+
+
+
+dim(kallisto_rlps.cts) #59853   543
+head(kallisto_rlps.cts[,1:5])
+```
+
+
+```{r}
+# identical(rownames(kallisto.cts), rownames(kallisto_rlps.cts)) #TRUE
+kallisto.cts <- cbind(kallisto.cts, kallisto_rlps.cts)
+dim(kallisto.cts) #59853  2116
+
+# saveRDS(kallisto.cts, file.path(PROJHOME,"0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/TARGET_AML_RBD_Dx_Rlps_NBM_MPN_Kallisto_Quant_GeneLevel_scaledTPM_counts.RDS"))
+```
+
+```{r}
+#Fix the PAR regions. Need to sum them since the fasta sequence is identical between PAR_Y and the X chromosome gene 
+PAR <- filter(geneIDmap, grepl("_PAR_Y", gene_id))
+nrow(PAR)
+PAR <- PAR %>% 
+  pull(gene_id) %>% 
+  gsub("_PAR_Y", "", .) %>% 
+  paste(., collapse="|")
+
+#For each PAR region, use ColSums to combine them 
+idx <- grep(PAR, rownames(kallisto.cts), value=TRUE) 
+length(idx) #90 PAR_Y and their X-chromosome pair
+pairs <- lapply(seq(2, length(idx), by=2), 
+                function(x){ 
+                  rows <- idx[c((x-1):x)]
+                  colSums(kallisto.cts[rows,])
+                }) %>% 
+  do.call(rbind, .)
+
+
+#Remove the PAR_Y rows and add in the summed gene expression
+non_PAR <- idx[seq(2, length(idx), by=2)-1]
+kallisto.cts <- kallisto.cts[!grepl("_PAR_Y$", rownames(kallisto.cts)), ]
+kallisto.cts[non_PAR,] <- pairs
+
+
+dim(kallisto.cts) #59808  2116
+head(kallisto.cts[,1:5])
+```
+
+```{r}
+#convert Ensembl IDs to Gene Symbols
+kallisto.cts.sym <- as.data.frame(kallisto.cts) %>% 
+  rownames_to_column("gene_id") %>% 
+  left_join(., select(geneIDmap,gene_id,gene_name),
+            by="gene_id") %>% 
+  select(gene_id,gene_name, everything())
+
+#seperate out those genes without duplicate symbols 
+kallisto.cts.sym_noDups <- kallisto.cts.sym %>% 
+  filter(!duplicated(gene_name), !duplicated(gene_name, fromLast = TRUE))
+
+#calculate the averate for all duplicate gene symbols. 
+kallisto.cts.sym_Dups <- kallisto.cts.sym %>% 
+  filter(duplicated(gene_name) | duplicated(gene_name, fromLast = TRUE)) %>% 
+  arrange(gene_name) %>% 
+  
+  #Calculate IQR to measure variance
+  rowwise() %>% 
+  mutate(IQR=IQR(c_across(Kasumi.AZA.D11.03A.01R:TARGET.00.R003669.34POS.14A.01R))) %>% 
+  ungroup() %>%
+  
+  #use the max IQR expression to address duplicate gene symbols
+  group_by(gene_name) %>%
+  mutate(Rank=rank(IQR,ties.method= "first")) %>%
+  mutate(Keep=ifelse(Rank==max(Rank), TRUE, FALSE)) %>% 
+  ungroup() %>% 
+  select(IQR:Keep, everything()) 
+  
+  # group_by(gene_name) %>%
+  # #use the average expression to address duplicate gene symbols
+  # mutate_at(vars(Kasumi.AZA.D11.03A.01R:TARGET.00.R003669.34POS.14A.01R),
+  #           ~(sum(.)/n())) %>%
+  # ungroup()
+
+
+# head(kallisto.cts.sym_Dups[,1:10])
+dim(kallisto.cts.sym_Dups) #1719 2118
+
+#remove duplicated gene_names
+kallisto.cts.sym_rmDups <- kallisto.cts.sym_Dups %>% 
+  filter(Keep) %>% 
+  select(-IQR,-Keep, -Rank) 
+
+
+dim(kallisto.cts.sym_rmDups) #174 2118
+# head(kallisto.cts.sym_rmDups)
+
+kallisto.cts.sym_final <- bind_rows(kallisto.cts.sym_noDups, kallisto.cts.sym_rmDups)
+
+dim(kallisto.cts.sym_final) #58263  2118
+head(kallisto.cts.sym_final[,1:5]) 
+
+
+# saveRDS(kallisto.cts.sym_final,
+#         file.path(PROJHOME,"0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/TARGET_AML_RBD_Dx_Rlps_NBM_MPN_Kallisto_Quant_GeneLevel_dupGenesRemoved_scaledTPM_counts.RDS"))
+```
+
+#### TPM
+
+```{r}
+kallisto.TPM <- readRDS(file.path(PROJHOME,"2017.10.09_Concatenate_1031_RNAseq/transcriptLevel/TARGET_AML_RBD_0531_1031_Kallisto_Quant_GeneLevel_Abundance_TPM.RDS"))
+
+#the column identifiers are really the "PATIENT_ID_Original" so need to be updated
+newColnames <- gsub("_RBS","", colnames(kallisto.TPM)) %>% 
+  gsub("_Replicate","_replicate", .) %>% 
+  gsub("-|\\+", "\\.", .) %>% 
+  ifelse(grepl("TARGET.20.PATGIG.03A.01R|TARGET.20.PATISD.09A.01R", .), paste0(.,"_replicate"), .)
+
+# newColnames
+# table(newColnames %in% sample_info$Sample) #all TRUE
+# any(duplicated(newColnames)) #FALSE
+
+
+colnames(kallisto.TPM) <- newColnames
+rownames(kallisto.TPM) <- gsub("\\.[0-9]{1,2}", "", rownames(kallisto.TPM))
+
+dim(kallisto.TPM) #59853  1573
+head(kallisto.TPM[,1:5])
+```
+
+```{r}
+kallisto_rlps.TPM <- readRDS(file.path(PROJHOME,"/2019.06.06_Concatenate_Relapse_RNAseq/ExpnData/geneLevel_Kallisto/TARGET_AML_RBD_Relapse_Kallisto_Quant_GeneLevel_Abundance_TPM.RDS"))
+
+
+rlps_Colnames <- gsub("_RBS", "", colnames(kallisto_rlps.TPM)) %>%
+  gsub("_Replicate","_replicate", .) %>% 
+  gsub("-", "\\.", .) %>% 
+  ifelse(grepl("R0[09]", .), paste0("TARGET.00.", .), .) %>% 
+  ifelse(!grepl("R0[09]", .), paste0("TARGET.20.", .), .) %>% 
+  #PAVNUW was supposed to be a replicate but the original sample failed sequencing. 
+  ifelse(grepl("TARGET.20.PAVNUW.03A.01R_replicate", .), gsub("_rep.+$", "", .), .)
+  
+
+# table(rlps_Colnames %in% sample_info$Sample) #TRUE
+# any(rlps_Colnames %in% colnames(kallisto.cts)) #FALSE
+# any(duplicated(rlps_Colnames)) #FALSE
+
+
+colnames(kallisto_rlps.TPM) <- rlps_Colnames
+rownames(kallisto_rlps.TPM) <- gsub("\\.[0-9]{1,2}", "", rownames(kallisto_rlps.TPM))
+
+
+
+dim(kallisto_rlps.TPM) #59853   543
+head(kallisto_rlps.TPM[,1:5])
+```
+
+```{r}
+identical(rownames(kallisto.TPM), rownames(kallisto_rlps.TPM)) #TRUE
+kallisto.TPM <- cbind(kallisto.TPM, kallisto_rlps.TPM)
+
+dim(kallisto.TPM) #59853  2116
+
+# saveRDS(kallisto.TPM, file.path(PROJHOME,"0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/TARGET_AML_RBD_Dx_Rlps_NBM_MPN_Kallisto_Quant_GeneLevel_Abundance_TPM.RDS"))
+```
+
+```{r}
+#Fix the PAR regions. Need to sum them since the fasta sequence is identical between PAR_Y and the X chromosome gene 
+PAR <- filter(geneIDmap, grepl("_PAR_Y", gene_id))
+nrow(PAR)
+PAR <- PAR %>% 
+  pull(gene_id) %>% 
+  gsub("_PAR_Y", "", .) %>% 
+  paste(., collapse="|")
+
+#For each PAR region, use ColSums to combine them 
+idx <- grep(PAR, rownames(kallisto.TPM), value=TRUE) 
+length(idx) #90 PAR_Y and their X-chromosome pair
+pairs <- lapply(seq(2, length(idx), by=2), 
+                function(x){ 
+                  rows <- idx[c((x-1):x)]
+                  colSums(kallisto.TPM[rows,])
+                }) %>% 
+  do.call(rbind, .)
+
+
+#Remove the PAR_Y rows and add in the summed gene expression
+non_PAR <- idx[seq(2, length(idx), by=2)-1]
+kallisto.TPM <- kallisto.TPM[!grepl("_PAR_Y$", rownames(kallisto.TPM)), ]
+kallisto.TPM[non_PAR,] <- pairs
+
+
+dim(kallisto.TPM) #59808  2116
+# head(kallisto.TPM[,1:5])
+```
+
+```{r}
+#convert Ensembl IDs to Gene Symbols
+kallisto.TPM.sym <- as.data.frame(kallisto.TPM) %>% 
+  rownames_to_column("gene_id") %>% 
+  left_join(., select(geneIDmap,gene_id,gene_name),
+            by="gene_id") %>% 
+  select(gene_id,gene_name, everything())
+
+#seperate out those genes without duplicate symbols 
+kallisto.TPM.sym_noDups <- kallisto.TPM.sym %>% 
+  filter(!duplicated(gene_name), !duplicated(gene_name, fromLast = TRUE))
+
+#calculate the averate for all duplicate gene symbols. 
+kallisto.TPM.sym_Dups <- kallisto.TPM.sym %>% 
+  filter(duplicated(gene_name) | duplicated(gene_name, fromLast = TRUE)) %>% 
+  arrange(gene_name) %>% 
+  
+  #Calculate IQR to measure variance
+  rowwise() %>% 
+  mutate(IQR=IQR(c_across(Kasumi.AZA.D11.03A.01R:TARGET.00.R003669.34POS.14A.01R))) %>% 
+  ungroup() %>%
+  
+  #use the max IQR expression to address duplicate gene symbols
+  group_by(gene_name) %>%
+  mutate(Rank=rank(IQR,ties.method= "first")) %>%
+  mutate(Keep=ifelse(Rank==max(Rank), TRUE, FALSE)) %>% 
+  ungroup() %>% 
+  select(IQR:Keep, everything()) 
+  
+  # group_by(gene_name) %>%
+  # #use the average expression to address duplicate gene symbols
+  # mutate_at(vars(Kasumi.AZA.D11.03A.01R:TARGET.00.R003669.34POS.14A.01R),
+  #           ~(sum(.)/n())) %>%
+  # ungroup()
+
+# head(kallisto.TPM.sym_Dups[,1:10])
+dim(kallisto.TPM.sym_Dups) #1719 2118
+
+#remove duplicated gene_names
+kallisto.TPM.sym_rmDups <- kallisto.TPM.sym_Dups %>% 
+  filter(Keep) %>% 
+  select(-IQR,-Keep, -Rank)
+
+
+dim(kallisto.TPM.sym_rmDups) #174 2118
+# head(kallisto.TPM.sym_rmDups)
+
+kallisto.TPM.sym_final <- bind_rows(kallisto.TPM.sym_noDups,
+                                    kallisto.TPM.sym_rmDups)
+
+dim(kallisto.TPM.sym_final) #58263  2118
+head(kallisto.TPM.sym_final[,1:5]) 
+
+
+# saveRDS(kallisto.TPM.sym_final,
+#         file.path(PROJHOME,"0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/TARGET_AML_RBD_Dx_Rlps_NBM_MPN_Kallisto_Quant_GeneLevel_dupGenesRemoved_Abundance_TPM.RDS"))
+```
+
+
+## Tx level
+
+```{r}
+txi.transcriptLevel <- readRDS("_rslurm_tximport_Tx/results_0.RDS") #this object is HUGE. It is 56Gb....
+
+names(txi.transcriptLevel)
+txi.transcriptLevel$countsFromAbundance
+```
+
+```{r}
+
+# lapply(txi.transcriptLevel[c(1:2,4)], function(x) head(x[,1:5]))
+# lapply(txi.transcriptLevel[c(1:2,4)], function(x) tail(x[,1:5]))
+# 
+# sapply(txi.transcriptLevel[c(1:2,4)], dim)
+```
+
+```{r}
+# write.csv(txi.transcriptLevel$abundance,
+#           "TARGET_AML_0531_1031_Kallisto_Quant_TranscriptLevel_Abundance_TPM.csv",row.names = TRUE)
+# 
+# write.csv(txi.transcriptLevel$counts,
+#           "TARGET_AML_0531_1031_Kallisto_Quant_TranscriptLevel_scaledTPM_counts.csv",row.names = TRUE)
+# 
+# write.csv(txi.transcriptLevel$length,
+#           "TARGET_AML_0531_1031_Kallisto_Quant_TranscriptLevel_Length.csv",row.names = TRUE)
+
+# saveRDS(txi.transcriptLevel$abundance,file.path(PROJHOME,
+#           "2017.10.09_Concatenate_1031_RNAseq/transcriptLevel/TARGET_AML_RBD_0531_1031_Kallisto_Quant_TranscriptLevel_Abundance_TPM.RDS"))
+# 
+# saveRDS(txi.transcriptLevel$counts,file.path(PROJHOME,
+#           "2017.10.09_Concatenate_1031_RNAseq/transcriptLevel/TARGET_AML_RBD_0531_1031_Kallisto_Quant_TranscriptLevel_scaledTPM_counts.RDS"))
+# 
+
+
+```
+
+```{r}
+library(readr)
+library(tibble)
+cts.tx <- read_csv(file.path(TARGET,"RNA/mRNAseq/level3/transcript/concat_matrices/2017July_BCCA_0531_1031_Kallisto_GRCh38_Illumina_data/TARGET_AML_0531_1031_Kallisto_Quant_TranscriptLevel_scaledTPM_counts.csv"))
+cts.tx <- column_to_rownames(cts.tx,"X1")
+
+dim(cts.tx)
+head(cts.tx[,1:5])
+```
+
+```{r}
+RBS <- cts.tx[,grep("_RBS", colnames(cts.tx))]
+
+dim(RBS)
+head(RBS[,1:5])
+
+# saveRDS(RBS,"TARGET_AML_RBD_Kallisto_Quant_TranscriptLevel_scaledTPM_counts.RDS")
+```
+
+```{r}
+polyA <- cts.tx[,grep("_PolyA", colnames(cts.tx), ignore.case = F)]
+
+dim(polyA)
+head(polyA[,1:5])
+
+# saveRDS(polyA,"TARGET_AML_PolyA_Kallisto_Quant_TranscriptLevel_TPM_scaledTPM_counts.RDS")
+```
+
+### Rename Column/ Merge Relapse data 
+
+```{r}
+sample_info <- read.csv(file.path(TARGET, "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_10.08.20.csv"))
+
+dim(sample_info)
+```
+
+```{r}
+kallisto.tx.TPM <- readRDS(file.path(PROJHOME,"2017.10.09_Concatenate_1031_RNAseq/transcriptLevel/TARGET_AML_RBD_0531_1031_Kallisto_Quant_TranscriptLevel_Abundance_TPM.RDS"))
+
+# the column identifiers are really the "PATIENT_ID_Original" so need to be updated
+newColnames <- gsub("_RBS","", colnames(kallisto.tx.TPM)) %>%
+  gsub("_Replicate","_replicate", .) %>%
+  gsub("-|\\+", "\\.", .) %>%
+  ifelse(grepl("TARGET.20.PATGIG.03A.01R|TARGET.20.PATISD.09A.01R", .), paste0(.,"_replicate"), .)
+
+# newColnames
+table(newColnames %in% sample_info$Sample) #all TRUE
+any(duplicated(newColnames)) #FALSE
+
+
+colnames(kallisto.tx.TPM) <- newColnames
+rownames(kallisto.tx.TPM) <- gsub("\\.[0-9]{1,2}", "",
+                                  str_split_fixed(rownames(kallisto.tx.TPM), pattern = "\\|", n=5)[,1])
+
+dim(kallisto.tx.TPM) #207826   1573
+# head(kallisto.tx.TPM[,1:5])
+
+kallisto_rlps.tx.TPM <- readRDS(file.path(PROJHOME,"/2019.06.06_Concatenate_Relapse_RNAseq/ExpnData/transcriptLevel_Kallisto/TARGET_AML_RBD_Relapse_Kallisto_Quant_TranscriptLevel_Abundance_TPM.RDS"))
+
+
+rlpsTx_Colnames <- gsub("_RBS", "", colnames(kallisto_rlps.tx.TPM)) %>%
+  gsub("_Replicate","_replicate", .) %>% 
+  gsub("-", "\\.", .) %>% 
+  ifelse(grepl("R0[09]", .), paste0("TARGET.00.", .), .) %>% 
+  ifelse(!grepl("R0[09]", .), paste0("TARGET.20.", .), .) %>% 
+  #PAVNUW was supposed to be a replicate but the original sample failed sequencing. 
+  ifelse(grepl("TARGET.20.PAVNUW.03A.01R_replicate", .), gsub("_rep.+$", "", .), .)
+  
+
+table(rlpsTx_Colnames %in% sample_info$Sample) #TRUE
+any(rlpsTx_Colnames %in% colnames(kallisto.tx.TPM)) #FALSE
+any(duplicated(rlpsTx_Colnames)) #FALSE
+
+
+colnames(kallisto_rlps.tx.TPM) <- rlpsTx_Colnames
+rownames(kallisto_rlps.tx.TPM) <- gsub("\\.[0-9]{1,2}", "", 
+                                       str_split_fixed(rownames(kallisto_rlps.tx.TPM), pattern = "\\|", n=5)[,1])
+
+
+dim(kallisto_rlps.tx.TPM)  #207826    543
+head(kallisto_rlps.tx.TPM[,1:5])
+```
+
+```{r}
+identical(rownames(kallisto.tx.TPM), rownames(kallisto_rlps.tx.TPM)) #TRUE
+kallisto.tx.TPM.final <- cbind(kallisto.tx.TPM, kallisto_rlps.tx.TPM)
+
+dim(kallisto.tx.TPM.final) #207826   2116
+kallisto_tx.cts
+# saveRDS(kallisto.tx.TPM.final, file.path(PROJHOME,"0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/TARGET_AML_RBD_Dx_Rlps_NBM_MPN_Kallisto_Quant_TranscriptLevel_Abundance_TPM.RDS"))
+```
+
+#### counts
+
+```{r}
+kallisto.tx.cts <- readRDS(file.path(PROJHOME,"2017.10.09_Concatenate_1031_RNAseq/transcriptLevel/TARGET_AML_RBD_0531_1031_Kallisto_Quant_TranscriptLevel_scaledTPM_counts.RDS"))
+
+# the column identifiers are really the "PATIENT_ID_Original" so need to be updated
+newColnames <- gsub("_RBS","", colnames(kallisto.tx.cts)) %>%
+  gsub("_Replicate","_replicate", .) %>%
+  gsub("-|\\+", "\\.", .) %>%
+  ifelse(grepl("TARGET.20.PATGIG.03A.01R|TARGET.20.PATISD.09A.01R", .), paste0(.,"_replicate"), .)
+
+# newColnames
+table(newColnames %in% sample_info$Sample) #all TRUE
+any(duplicated(newColnames)) #FALSE
+
+
+colnames(kallisto.tx.cts) <- newColnames
+rownames(kallisto.tx.cts) <- gsub("\\.[0-9]{1,2}", "",
+                                  str_split_fixed(rownames(kallisto.tx.cts), pattern = "\\|", n=5)[,1])
+
+dim(kallisto.tx.cts) #207826   1573
+head(kallisto.tx.cts[,1:5])
+
+kallisto_rlps.tx.cts <- readRDS(file.path(PROJHOME,"/2019.06.06_Concatenate_Relapse_RNAseq/ExpnData/transcriptLevel_Kallisto/TARGET_AML_RBD_Relapse_Kallisto_Quant_TranscriptLevel_scaledTPM_counts.RDS"))
+
+
+rlpsTx_Colnames <- gsub("_RBS", "", colnames(kallisto_rlps.tx.cts)) %>%
+  gsub("_Replicate","_replicate", .) %>% 
+  gsub("-", "\\.", .) %>% 
+  ifelse(grepl("R0[09]", .), paste0("TARGET.00.", .), .) %>% 
+  ifelse(!grepl("R0[09]", .), paste0("TARGET.20.", .), .) %>% 
+  #PAVNUW was supposed to be a replicate but the original sample failed sequencing. 
+  ifelse(grepl("TARGET.20.PAVNUW.03A.01R_replicate", .), gsub("_rep.+$", "", .), .)
+  
+
+table(rlpsTx_Colnames %in% sample_info$Sample) #TRUE
+any(rlpsTx_Colnames %in% colnames(kallisto.tx.cts)) #FALSE
+any(duplicated(rlpsTx_Colnames)) #FALSE
+
+
+colnames(kallisto_rlps.tx.cts) <- rlpsTx_Colnames
+rownames(kallisto_rlps.tx.cts) <- gsub("\\.[0-9]{1,2}", "", 
+                                       str_split_fixed(rownames(kallisto_rlps.tx.cts), pattern = "\\|", n=5)[,1])
+
+
+dim(kallisto_rlps.tx.cts)  #207826    543
+head(kallisto_rlps.tx.cts[,1:5])
+```
+
+```{r}
+identical(rownames(kallisto.tx.cts), rownames(kallisto_rlps.tx.cts)) #TRUE
+kallisto.tx.cts.final <- cbind(kallisto.tx.cts, kallisto_rlps.tx.cts)
+
+dim(kallisto.tx.cts.final) #207826   2116
+head(kallisto.tx.cts.final[,1:5])
+
+
+# saveRDS(kallisto.tx.cts.final, file.path(PROJHOME,"0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/TARGET_AML_RBD_Dx_Rlps_NBM_MPN_Kallisto_Quant_TranscriptLevel_scaledTPM_counts.RDS"))
+```
+
+#Subset Cell Line Data
+
+```{r}
+library(aws.s3)
+library(aws.signature)
+```
+
+```{r}
+sample_info <- read.csv(file.path(TARGET, "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_02.04.21.csv"))
+
+dim(sample_info)
+```
+
+```{r}
+kallisto.tx.TPM.final <- readRDS(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/TARGET_AML_RBD_Dx_Rlps_NBM_MPN_Kallisto_Quant_TranscriptLevel_Abundance_TPM.RDS"))
+
+
+dim(kallisto.tx.TPM.final)
+head(kallisto.tx.TPM.final[,1:5])
+```
+
+```{r}
+celllines <- sample_info %>% 
+  filter(Group=="CellLine")
+
+
+# celllines
+
+soFar <- intersect(celllines$Sample, colnames(kallisto.tx.TPM.final))
+toDo <- setdiff(celllines$Sample, colnames(kallisto.tx.TPM.final))
+files.regex <- paste(toDo, collapse="|")
+toDo
+```
+
+There are 12 so far, need the additional ones. But we're missing 6/11 cell lines BAM files...
+
+
+```{r}
+BAMs <- dir(file.path(SCRATCH,"2020.06.10_BCCA_mRNAseq_Remission_Data_Download"),
+            pattern="withJunctionsOnGenome_dupsFlagged.bam", #this filename convention for the 75bp BAM files
+            recursive=T, full.names = T)
+
+# length(BAMs) #677
+# head(BAMs)
+# tail(BAMs)
+```
+
+```{r}
+in_bams <- BAMs[!grepl("2020.06.10_BCCA_mRNAseq_Remission_Data_Download/75bp", BAMs)] #this is Amanda's working directory, so skip this one
+
+BAMs.df <- str_split_fixed(in_bams,pattern = "/",n=12) %>% 
+  as.data.frame() %>% 
+  select(V7:V9,V12) %>% 
+  separate(V8,into=c("A","B"), sep = "_") %>% 
+  rename_all(~c("Directory","Flowcell","Lane","Read_Length","Filename")) %>% 
+  mutate(Index=str_split_fixed(Filename, "_", n=5)[,3],
+         Filepath=in_bams)%>% 
+  select(Directory:Read_Length,Index,Filename, Filepath) 
+
+
+head(BAMs.df)
+# dim(BAMs.df) #677   7
+```
+
+```{r}
+trackingFile <- xlsx::read.xlsx(file.path(TARGET,"RNA/mRNAseq/metadata/RNAseq_Submission_Manifests_SOWs/SOW_GSC-1832/Tracking_Sheet/SOW_GSC-1832_Data_Download_Tracking_Sheet_asOf_01.15.2021.xlsx"), sheetIndex = 1)
+
+
+head(trackingFile)
+dim(trackingFile)  #725  19
+table(trackingFile$Comments) #Missing 27 samples' BAM files. 
+
+# tail(library_summaries)
+# length(unique(library_summaries$EXTERNAL_IDENTIFIER)) #563
+```
+
+```{r}
+lib_summaries <- read.delim(file.path(SCRATCH,"2020.06.10_BCCA_mRNAseq_Remission_Data_Download/cellLines_library_summaries.txt"),
+                            sep="\t", header = FALSE) %>% 
+  filter(!grepl("STAR", V12)) %>% 
+  select(V2:V16) %>% 
+  mutate_all(~as.character(.)) %>% 
+  rename_all(~c("SOW", "LIBRARY", "INDEX",   "FLOWCELL",      
+                "LANE",    "ANTIBODY" ,    
+                "UPPER_PROTOCOL",  "EXPERIMENTAL_CONDITION",
+                "CELL_CONDITION",  
+                 "TAXONOMY_ID", "SPECIES", "SEQ LENGTH",
+                "PATIENT_ID",
+                "EXTERNAL_IDENTIFIER",    
+                "ORIGINAL_SOURCE")) %>% 
+  inner_join(.,BAMs.df, by=c("INDEX"="Index","FLOWCELL"="Flowcell", "LANE"="Lane"))  %>% 
+  select(SOW:LIBRARY,EXTERNAL_IDENTIFIER,everything()) %>% 
+  mutate(New_Filename=paste0(EXTERNAL_IDENTIFIER,
+                            gsub("^.+(_withJunctionsOnGenome_dupsFlagged.bam)", "\\1", Filename)))
+
+lib_summaries
+# write.csv(lib_summaries,"CellLines_IDmapping_Index_to_EXTERNAL_IDENTIFIER.csv", row.names = F)
+
+
+# dir.create(file.path(SCRATCH, "jlsmith3/CellLines"))
+# write.csv(lib_summaries,file.path(SCRATCH, "jlsmith3/CellLines/CellLines_IDmapping_Index_to_EXTERNAL_IDENTIFIER.csv"), row.names = F, quote = FALSE)
+```
+
+## Rename BAM files and Upload 
+
+```{bash eval=FALSE}
+cd "/fh/scratch/delete90/meshinchi_s/jlsmith3/CellLines"
+cat CellLines_IDmapping_Index_to_EXTERNAL_IDENTIFIER.csv | cut -f 19 -d "," | grep -v -E "Filepath"  >  oldFilenames.txt 
+cat CellLines_IDmapping_Index_to_EXTERNAL_IDENTIFIER.csv | cut -f 20 -d "," | grep -v -E "New_Filename"  >  newFilenames.txt 
+PREFIX="TARGET_AML/RNAseq_Illumina_Data/BAM"
+
+sbatch "~/scripts/sbatch_jobs/Upload_Rename_MD5check_S3.sh oldFilenames.txt newFilenames.txt $PREFIX" 
+```
+
+
+## Run Kallisto and Concatenate results
+
+```{r}
+#Set-up config
+creds <- aws.signature::use_credentials(profile = "default")
+Sys.setenv("AWS_ACCESS_KEY_ID" = creds$default$AWS_ACCESS_KEY_ID,
+           "AWS_SECRET_ACCESS_KEY" = creds$default$AWS_SECRET_ACCESS_KEY,
+           "AWS_DEFAULT_REGION"="us-west-2")
+
+
+blist <- bucketlist()
+blist
+
+BUCKET="fh-pi-meshinchi-s-eco-public"
+PREFIX="TARGET_AML/RNAseq_Illumina_Data/BAM"
+
+bams <- get_bucket_df(bucket = BUCKET, prefix = PREFIX,
+                      max = Inf)
+head(bams) #7338    8
+dim(bams)
+```
+
+```{r}
+files.regex  <- lib_summaries %>% 
+  pull("EXTERNAL_IDENTIFIER") %>% 
+  paste(., collapse="|")
+
+sample_sheet <- bams %>% 
+  select(BAM=Key) %>%
+  filter(grepl(files.regex, BAM), grepl(".bam$", BAM)) %>%  
+  mutate(Sample=str_split_fixed(gsub(".bam","",BAM), pattern="/",n=4)[,4],
+         BAM=paste("s3:/",BUCKET, BAM, sep = "/")) %>%
+  select(Sample, BAM)
+  
+
+head(sample_sheet)
+dim(sample_sheet) #50  2
+# write.table(sample_sheet,"CellLines_Sample_Sheet.txt", row.names = F, quote=F, sep="\t")
+# write.table(sample_sheet,file.path(SCRIPTS, "batch_pipeline/sample_sheets/CellLines_Sample_Sheet.txt"), row.names = F, quote=F, sep="\t")
+```
+
+```{bash eval=FALSE}
+cd ~/scripts/batch_pipeline
+./kallisto_run.sh
+```
+
+```{r}
+kallisto_res <- get_bucket_df(bucket = BUCKET, 
+                              prefix = "TARGET_AML/RNAseq_Illumina_Data/Kallisto",
+                              max=Inf) %>% 
+  filter(grepl(files.regex, filename))
+
+head(kallisto_res)
+```
+
+```{bash eval=FALSE}
+BUCKET="s3://fh-pi-meshinchi-s-eco-public"
+PREFIX="TARGET_AML/RNAseq_Illumina_Data/Kallisto"
+
+regex="TARGET-20-WSUAML-50A-01R|TARGET-20-TF1-50A-01R|TARGET-20-OCIAML2-50A-02R|TARGET-20-ML1-50A-01R|TARGET-20-REH-50A-01R"
+dirs=$(aws s3 ls $BUCKET/$PREFIX/ | grep -E $regex | tr -s " " | cut -f 3 -d " ")
+for dir in $(echo $dirs); do aws s3 cp --recursive $BUCKET/$PREFIX/$dir $dir  ; done
+```
+
+## Run TXImport
+
+```{r}
+IDmap <- read.csv(file.path(HOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_Gene_IDmap.csv"))
+
+head(IDmap)
+dim(IDmap) #207826     22
+```
+
+```{r}
+res <- dir(file.path(SCRATCH,"jlsmith3/CellLines"), pattern=".tsv",recursive = T, full.names = T)
+names(res) <- gsub("^.+CellLines\\/(TAR.+)_with.+tsv$","\\1", res) %>%
+  gsub("-",".", .)
+
+# head(res)
+# length(res) #5
+
+tx2gene <- dplyr::select(IDmap, transcript_id, gene_id)
+
+head(tx2gene)
+```
+
+```{r}
+# sopt <- list('nodes'='1', 'cpus-per-task'='4',
+#              'partition'='campus-new', 'mem'='62G',
+#              'time' = '24:00:00', 'mail-type'='FAIL',
+#              'mail-user'='jlsmith3@fredhutch.org') 
+
+txLvl <- tximport::tximport(files=res,
+                              type="kallisto",
+                              tx2gene = tx2gene,
+                              txIn = TRUE,
+                              txOut=TRUE,
+                              ignoreAfterBar = TRUE,
+                              countsFromAbundance = "scaledTPM")
+
+
+```
+
+```{r}
+# str(geneLvl)
+names(txLvl)
+txLvl$countsFromAbundance
+# saveRDS(txLvl, "TARGET_AML_CellLines_5samples_TranscriptLevel_Tximport.RDS")
+```
+
+## Merge in Counts
+
+```{r}
+head(txLvl$abundance)
+newRownames <- str_split_fixed(rownames(txLvl$abundance), pattern = "\\|",n=2)[,1] %>%  
+  gsub("\\.[0-9]{1,2}", "", .)
+
+identical(rownames(kallisto.tx.TPM.final), rownames(txLvl$abundance))
+identical(rownames(kallisto.tx.TPM.final), newRownames)
+
+
+rownames(txLvl$abundance) <- newRownames
+identical(rownames(kallisto.tx.TPM.final), rownames(txLvl$abundance))
+```
+
+```{r}
+TPM.subset <- kallisto.tx.TPM.final[,soFar]
+TPM.subset <- cbind(TPM.subset,txLvl$abundance)
+
+dim(TPM.subset) #207826     17
+head(TPM.subset)
+```
+
+```{r}
+# # dir.create("transcriptLevel/CellLines")
+# write.csv(TPM.subset,
+#           "transcriptLevel/CellLines/TARGET_AML_CelLines_Kallisto_Quant_TranscriptLevel_Abundance_TPM.csv")
+
+# getwd()
+```
+
+
+
+#SessionInfo
+
+```{r}
+sessionInfo()
+```
+

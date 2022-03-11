@@ -1,0 +1,293 @@
+---
+title: "Concatenate Ribodepleted RNAseq counts from Kallisto Quant"
+author: "Jenny Smith"
+date: "March 4, 2019"
+output: html_document
+---
+
+#Set-up
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 8, fig.width = 10)
+knitr::opts_knit$set(root.dir = file.path(SCRATCH,'jlsmith3/kallisto/'))
+options(stringsAsFactors = FALSE)
+```
+
+```{r}
+library(tximport)
+library(rhdf5)
+library(readr)
+
+library(edgeR)
+library(limma)
+library(RColorBrewer)
+library(stringr)
+library(dplyr)
+library(tibble)
+library(magrittr)
+```
+
+```{r}
+source(file.path(SCRIPTS,"conversion_scripts/Merge_Cat_FixDupIDs_Function.r"))
+```
+
+
+
+NOTE: 
+
+The working directory is kallisto on scratch/, whcih is temporary storage and will be deleted in 90 days. The way to reproduce this code is to re-download files from AWS s3 bucket. 
+
+ Possible to do this through R client as well, but I did it using aws command line interface. 
+
+```{bash, eval=FALSE}
+ml awscli 
+cd /fh/scratch/delete90/meshinchi_s/jlsmith3/kallisto/SWOG
+BUCKET="s3://fh-pi-meshinchi-s"
+aws s3 cp --only-show-errors --recursive  --exclude "*" --include "*.h5" --include "*.json"  $BUCKET/SR/SWOG/kallisto_out/ .
+```
+
+
+# Define Kallisto quant files 
+
+```{r}
+path <-file.path(SCRATCH, "jlsmith3/kallisto/SWOG")
+
+hdf5 <- dir(path=path, pattern = "*.h5",
+            recursive = TRUE, 
+            full.names = TRUE)
+
+head(hdf5)
+length(hdf5) #320
+```
+
+
+#Create Sample Manifest 
+
+```{r}
+manifest <- read.csv(file.path(SWOG,"RNA/mRNAseq/metadata/data_manifest-Dec2019.csv")) %>% 
+  select(Description:ID, Done.at..Fred.Hutch.vs..BCCA.:Fraction) %>%
+  unique()
+
+
+head(manifest)
+dim(manifest) #352   8
+```
+
+```{r}
+patient.IDs <- data.frame(filepath=hdf5) %>% 
+  mutate(filename=str_split_fixed(filepath, pattern = "[/]", n=10)[,9]) %>% 
+  mutate(Sample=case_when(
+                  grepl("^[0-9]{4}_[0-9]", filename) ~ gsub("^[0-9]{4}_", "", filename),
+                  grepl("^NL_.+$",filename) ~ gsub("^NL_(.+)$","\\1",filename),
+                  grepl("^AML_.+$",filename) ~ gsub("^AML_(.+)$","\\1",filename),
+                  TRUE ~ filename)) %>%
+  mutate(SWOGID=gsub("-B1-R$|_B_.+$|_M_.+$|^AML_|_3[48].+$|_NL.+$", "", Sample),
+         Quant_Method="Kallisto",
+         Quant_Ref="Gencode v29 GRCh38",
+         Lib_Prep="RBS", 
+         Group=case_when(
+           grepl("RO51044", filename) ~ "AML",
+           grepl("RO03721|RO03701|RO03693|NLPBSCCD34", filename) ~ "Normal PBSC",
+           grepl("NLBMCD34|NLBM", filename) ~ "Normal BM",
+           grepl("NLPB", filename) ~ "Normal PB",
+           grepl("GRN0371|AML018|RO51044", filename) ~ "AML",
+           grepl("^[0-9]", filename) ~ "AML"),
+         Sample_Type=case_when(
+           grepl("AML_RO51044_34P_B_mR_N_F_S218", filename) ~ "CD34+ blasts",
+           grepl("AML_RO51044_38N_B_mR_N_F_S219", filename) ~ "CD34+ CD38- blasts",
+           grepl("AML_RO51044_38P_B_mR_N_F_S220", filename) ~ "CD34+ CD38+ blasts",
+           grepl("NLBMCD34", filename) ~ "CD34+ Normal BM",
+           grepl("NLBM", filename) ~ "bulk mononuclear",
+           grepl("NLPB", filename) ~ "bulk mononuclear",
+           grepl("RO03721|RO03701|RO03693|NLPBSCCD34", filename) ~ "CD34+ Normal PBSC",
+           grepl("GRN0371|AML018", filename) ~ "EXCLUDE",
+           grepl("_B_|-B1-", filename) ~ "blasts",
+           grepl("_M_", filename) ~ "bulk mononuclear"))  %>% 
+  left_join(., manifest, by="Sample") %>%
+  mutate(RNA_Expraction_Type=case_when(
+           grepl("_R_", filename) | grepl("mRNA", RNA.type) ~ "total RNA",
+           grepl("_mR_", filename) | grepl("miRNA", RNA.type) ~ "microRNA preserved RNA"),
+        Tissue_Source=case_when(
+            grepl("-[0-9]{4}2$", SWOGID) | grepl("PB", Description) ~ "peripheral blood", 
+            grepl("-[0-9]{4}1$", SWOGID) | grepl("BM", Description) ~ "bone marrow", 
+            TRUE ~ "Unknown")) %>% 
+  select(1:9,RNA_Expraction_Type:Tissue_Source, everything()) %>%
+  arrange(desc(SWOGID))
+
+head(patient.IDs)
+dim(patient.IDs) #320  18
+# View(patient.IDs)
+# write.csv(patient.IDs, file.path(PROJHOME,"2019.04.05_Kallisto_DE_Transcriptome_MS/SWOG_AML/SWOG_AML_Kallisto_Quant_Gencode_v29_RepBase_v24.01_Sample_IDmap.csv"),row.names = FALSE)
+# write.csv(patient.IDs, file.path(SWOG,"RNA/mRNAseq/metadata/SWOG_AML_Kallisto_Quant_Gencode_v29_RepBase_v24.01_Sample_IDmap.csv"),row.names = FALSE)
+```
+
+```{r}
+table(duplicated(patient.IDs$SWOGID))
+table(duplicated(patient.IDs$Sample))
+```
+
+```{r}
+table(patient.IDs$Group, useNA = "ifany")
+table(patient.IDs$Sample_Type, useNA = "ifany")
+table(patient.IDs$RNA_Expraction_Type, useNA = "ifany")
+table(patient.IDs$Tissue_Source, useNA = "ifany")
+```
+
+
+
+#Create a Gene to Transcript ID Map 
+
+https://www.gencodegenes.org/human/stats.html
+
+```{r}
+ID.map <- read.csv(file.path(HOME,"/0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_Gene_IDmap.csv"))
+
+head(ID.map[,1:5])
+dim(ID.map) #207826     22
+```
+
+
+#TXimport with the HDF5 files
+
+
+https://wurmlab.github.io/genomicscourse/2016-SIB/practicals/rnaseq/TP2
+For this purpose, they introduced the "scaledTPM" values, which are obtained by summing the transcript-level TPMs by gene, and multiplying them with the total library size in millions. 
+
+ScaledTPM values are artificial values, transforming underlying abundance measures to the scale of read counts. This allows to incorporate the information provided by the sequencing depth, and work with RNA-seq differential expression tools that were developed to use read counts. 
+countsFromAbundance:
+character, either "no" (default), "scaledTPM", or "lengthScaledTPM", for whether to generate estimated counts using abundance estimates scaled up to library size (scaledTPM) or additionally scaled using the average transcript length over samples and the library size (lengthScaledTPM). if using scaledTPM or lengthScaledTPM, then the counts are no longer correlated with average transcript length, and so the length offset matrix should not be used.
+
+```{r}
+library(rslurm)
+```
+
+```{r}
+swog_files <- paste(patient.IDs$filepath) %>% 
+  set_names(patient.IDs$filename)
+
+tx2gene <- dplyr::select(ID.map, transcript_id, gene_id)
+
+sopt <- list(nodes='1', 'cpus-per-task'='4',
+             'partition'='campus', 'mem'='30G',
+             'time' = '24:00:00', 'mail-type'='FAIL,END',
+             'mail-user'='jlsmith3@fredhutch.org') 
+
+```
+
+```{r}
+swog.geneLevel.job <- slurm_call(f=tximport,
+                     jobname = "SWOG_gene",
+                     params =  list(files = swog_files,
+                                    type="kallisto", 
+                                    tx2gene = tx2gene, 
+                                    txIn = TRUE,
+                                    txOut = FALSE,
+                                    ignoreAfterBar = TRUE, 
+                                    dropInfReps= FALSE,
+                                    countsFromAbundance = "scaledTPM"),
+                     add_objects = c("swog_files","tx2gene"),
+                     slurm_options=sopt,
+                     submit = TRUE) #Submitted batch job 
+
+# str(swog.geneLevel.job)
+get_job_status(swog.geneLevel.job)
+```
+
+```{r}
+swog.txLevel.job <- slurm_call(f=tximport,
+                     jobname = "SWOG_tx",
+                     params =  list(files = swog_files,
+                                    type="kallisto", 
+                                    tx2gene = tx2gene, 
+                                    txIn = TRUE,
+                                    txOut = TRUE,
+                                    ignoreAfterBar = TRUE, 
+                                    dropInfReps= FALSE,
+                                    countsFromAbundance = "scaledTPM"),
+                     add_objects = c("swog_files","tx2gene"),
+                     slurm_options=sopt,
+                     submit = TRUE) #Submitted batch job
+
+
+# str(swog.txLevel.job) 
+get_job_status(swog.txLevel.job)
+```
+
+
+#Read in the results of tximport 
+
+```{r}
+destination <- file.path(SWOG,"RNA/mRNAseq/analysis/2020.01.16_Kallisto_Quant/")
+```
+
+```{r}
+swog.geneLevel <- readRDS("_rslurm_SWOG_gene/results_0.RDS")
+swog.geneLevel$countsFromAbundance
+```
+
+```{r}
+lapply(swog.geneLevel[c(1:2,4)], function(x) head(x[,1:5]))
+lapply(swog.geneLevel[c(1:2,4)], function(x) tail(x[,1:5]))
+sapply(swog.geneLevel[c(1:2,4)], dim)
+```
+
+```{r}
+# saveRDS(swog.geneLevel$abundance,
+#           paste0(destination, "SWOG_AML_Kallisto_Quant_GeneLevel_Abundance_TPM.RDS"))
+# 
+# saveRDS(swog.geneLevel$counts,
+#           paste0(destination,"SWOG_AML_Kallisto_Quant_GeneLevel_scaledTPM_counts.RDS"))
+# 
+# saveRDS(swog.geneLevel$length,
+#           paste0(destination,"SWOG_AML_Kallisto_Quant_GeneLevel_Length.RDS"))
+
+# write.csv(swog.geneLevel$abundance,
+#           paste0(destination, "SWOG_AML_Kallisto_Quant_GeneLevel_Abundance_TPM.csv"))
+# 
+# write.csv(swog.geneLevel$counts,
+#           paste0(destination,"SWOG_AML_Kallisto_Quant_GeneLevel_scaledTPM_counts.csv"))
+# 
+# write.csv(swog.geneLevel$length,
+#           paste0(destination,"SWOG_AML_Kallisto_Quant_GeneLevel_Length.csv"))
+```
+
+```{r}
+swog.transcriptLevel <- readRDS("_rslurm_SWOG_tx/results_0.RDS") 
+names(swog.transcriptLevel)
+swog.transcriptLevel$countsFromAbundance
+```
+
+```{r}
+new_rownames <- str_split_fixed(rownames(swog.transcriptLevel$abundance),
+                                pattern = "\\|", n = 2)[,1] 
+swog.transcriptLevel[c(1:2,4)] <- lapply(swog.transcriptLevel[c(1:2,4)],
+                                       set_rownames, value=new_rownames)
+```
+
+```{r}
+lapply(swog.transcriptLevel[c(1:2,4)], function(x) head(x[,1:5]))
+lapply(swog.transcriptLevel[c(1:2,4)], function(x) tail(x[,1:5]))
+
+sapply(swog.transcriptLevel[c(1:2,4)], dim)
+```
+
+```{r}
+# saveRDS(swog.transcriptLevel$abundance,
+#           paste0(destination,"SWOG_AML_Kallisto_Quant_TranscriptLevel_Abundance_TPM.RDS"))
+# 
+# saveRDS(swog.transcriptLevel$counts,
+#         paste0(destination, "SWOG_AML_Kallisto_Quant_TranscriptLevel_scaledTPM_counts.RDS"))
+# 
+# saveRDS(swog.transcriptLevel$length,
+#           paste0(destination,"SWOG_AML_Kallisto_Quant_TranscriptLevel_Length.RDS"))
+```
+
+
+
+#SessionInfo
+
+```{r}
+sessionInfo()
+```
+

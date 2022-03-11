@@ -1,0 +1,264 @@
+---
+title: "Concatenate Ribodepleted RNAseq counts from Kallisto Quant from Relapse Samples"
+author: "Jenny Smith"
+date: "June 13, 2019"
+output: html_document
+---
+
+#Set-up
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 8, fig.width = 10)
+knitr::opts_knit$set(root.dir = '/fh/scratch/delete90/meshinchi_s/jlsmith3/kallisto/')
+options(stringsAsFactors = FALSE)
+```
+
+```{r}
+library(tximport)# lib.loc = "/home/jlsmith3/R/x86_64-pc-linux-gnu-library/3.5")
+library(rhdf5)
+library(readr)
+
+library(edgeR)
+library(limma)
+library(RColorBrewer)
+library(stringr)
+library(dplyr)
+library(tibble)
+library(magrittr)
+
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/R/in_progress/ggplot_Themes_Function.r")
+source("~/scripts/conversion_scripts/GTF_to_IDmap_Function.r")
+```
+
+
+
+NOTE: 
+
+The working directory is kallisto on scratch/, whcih is temporary storage and will be deleted in 90 days. The way to reproduce this code is to re-download files from AWS s3 bucket. 
+
+Will add code-snippet here. Possible to do this through R client as well, but I did it using aws command line interface. 
+
+```{bash, eval=FALSE}
+ml awscli 
+cd /fh/scratch/delete90/meshinchi_s/jlsmith3/kallisto/Relapse
+BUCKET="s3://fh-pi-meshinchi-s"
+aws s3 cp --only-show-errors --recursive  --exclude "*" --include "*.h5" --include "*.json"  $BUCKET/SR/kallisto_out/ .
+```
+
+
+The tximport package will not interpret the .h5 files as hdf5 format when named anything other than abundance.h5, which is quirky to say the least. 
+
+Replicate Samples in Relapse batch:
+TARGET-20-PATGTL-03A-01R
+TARGET-20-PASMSZ-03A-01R
+TARGET-20-PAXWMS-03A-01R
+TARGET-20-PAVNUW-03A-01R
+
+#Read in the manifest file
+
+```{r}
+Reps <- c("TARGET-20-PAVNUW-03A-01R",
+"TARGET-20-PATGTL-03A-01R",
+"TARGET-20-PASMSZ-03A-01R",
+"TARGET-20-PAXWMS-03A-01R")
+```
+
+```{r}
+manifest <- read.csv("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/SequencingDataMatrix/TARGET_AML_RBD_Relapse_Manifest_v4.csv", row.names = 1) %>% 
+  mutate(Replicate=ifelse(Sample.ID %in% Reps, "Replicate", "none"))
+
+# head(manifest)
+dim(manifest)
+```
+
+```{r}
+table(manifest$Replicate)
+# write.csv(manifest,"/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/SequencingDataMatrix/TARGET_AML_RBD_Relapse_Manifest_v3.csv")
+```
+
+
+#Define Kallisto quant files 
+
+```{r}
+path <- paste0(getwd(), "/Relapse")
+
+hdf5 <- dir(path=path, pattern = "*.h5",recursive = TRUE, full.names = TRUE)
+
+head(hdf5)
+length(hdf5) #543 
+```
+
+```{r}
+patient.IDs <- data.frame(filepath=hdf5,
+                          filename=str_split_fixed(hdf5, "/", n=10)[,9]) %>% 
+  
+  mutate(TARGET.Barcode=str_split_fixed(filename, pattern = "[_]", n=3)[,1]) %>%
+  mutate(Lib_Prep="RBS") %>%
+  mutate(Final_Colname=gsub("TARGET-[0-9]{2}-","",TARGET.Barcode)) %>% 
+  
+  left_join(., manifest, by=c("TARGET.Barcode"="Sample.ID")) %>%
+
+  mutate_at(vars(Final_Colname),
+            ~gsub("_none|_Original", "", paste(., Lib_Prep, Replicate, sep="_"))) %>%
+
+  arrange(Final_Colname)
+
+
+head(patient.IDs)
+dim(patient.IDs)
+
+# write.csv(patient.IDs, "TARGET_AML_RBD_Relapse_Sample_IDmap.csv",row.names = FALSE)
+```
+
+
+
+#Read in a Gene to Transcript ID Map 
+
+https://www.gencodegenes.org/human/stats.html
+
+```{r}
+IDmap <- read.csv("~/RNA_seq_Analysis/0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_Gene_IDmap.csv")
+
+head(IDmap[,1:5])
+dim(IDmap)
+```
+
+
+#TXimport with the HDF5 files
+
+https://wurmlab.github.io/genomicscourse/2016-SIB/practicals/rnaseq/TP2
+For this purpose, they introduced the "scaledTPM" values, which are obtained by summing the transcript-level TPMs by gene, and multiplying them with the total library size in millions. 
+
+ScaledTPM values are artificial values, transforming underlying abundance measures to the scale of read counts. This allows to incorporate the information provided by the sequencing depth, and work with RNA-seq differential expression tools that were developed to use read counts. 
+
+
+countsFromAbundance:
+character, either "no" (default), "scaledTPM", or "lengthScaledTPM", for whether to generate estimated counts using abundance estimates scaled up to library size (scaledTPM) or additionally scaled using the average transcript length over samples and the library size (lengthScaledTPM). if using scaledTPM or lengthScaledTPM, then the counts are no longer correlated with average transcript length, and so the length offset matrix should not be used.
+
+```{r}
+library(rslurm)
+```
+
+```{r}
+files <-patient.IDs$filepath %>% 
+  set_names(patient.IDs$Final_Colname)
+
+tx2gene <- dplyr::select(IDmap, transcript_id, gene_id)
+
+sopt <- list(nodes='1', 'cpus-per-task'='16',
+             'partition'='largenode', 'mem'='62G',
+             'time' = '24:00:00', 'mail-type'='END,FAIL',
+             'mail-user'='jlsmith3@fredhutch.org') 
+
+```
+
+```{r}
+txi.geneLevel.job <- slurm_call(f=tximport,
+                     jobname = "AML_relapse_gene",
+                     params =  list(files = files,
+                                    type="kallisto", 
+                                    tx2gene = tx2gene, 
+                                    txIn = TRUE,
+                                    txOut = FALSE,
+                                    ignoreAfterBar = TRUE, 
+                                    dropInfReps= TRUE,
+                                    countsFromAbundance = "scaledTPM"),
+                     add_objects = c("files","tx2gene"),
+                     slurm_options=sopt,
+                     submit = TRUE) #Submitted batch job 
+
+
+```
+
+```{r}
+get_job_status(txi.geneLevel.job)
+```
+
+```{r}
+txi.txLevel.job <- slurm_call(f=tximport,
+                     jobname = "AML_relapse_Tx",
+                     params =  list(files = files,
+                                    type="kallisto", 
+                                    tx2gene = tx2gene, 
+                                    txIn = TRUE,
+                                    txOut = TRUE,
+                                    ignoreAfterBar = TRUE, 
+                                    dropInfReps= TRUE,
+                                    countsFromAbundance = "scaledTPM"),
+                     add_objects = c("files","tx2gene"),
+                     slurm_options=sopt,
+                     submit = TRUE) #Submitted batch job 
+
+
+# str(txi.txLevel.job) 
+```
+
+```{r}
+get_job_status(txi.txLevel.job)
+```
+
+
+## read in the results of tximport 
+
+```{r}
+txi.geneLevel <- readRDS("_rslurm_AML_relapse_gene/results_0.RDS") 
+txi.geneLevel$countsFromAbundance
+```
+
+```{r}
+lapply(txi.geneLevel[c(1:3)], function(x) head(x[,1:5]))
+
+sapply(txi.geneLevel[c(1:3)], dim)
+```
+
+```{r}
+# saveRDS(txi.geneLevel$abundance,
+#           "TARGET_AML_RBD_Relapse_Kallisto_Quant_GeneLevel_Abundance_TPM.RDS")
+# 
+# saveRDS(txi.geneLevel$counts,
+#           "TARGET_AML_RBD_Relapse_Kallisto_Quant_GeneLevel_scaledTPM_counts.RDS")
+# 
+# saveRDS(txi.geneLevel$length  ,
+#           "TARGET_AML_RBD_Relapse_Kallisto_Quant_GeneLevel_scaledTPM_length.RDS")
+```
+
+```{r}
+txi.transcriptLevel <- readRDS("_rslurm_AML_relapse_Tx/results_0.RDS") 
+txi.transcriptLevel$countsFromAbundance
+```
+
+```{r}
+# txi.transcriptLevel <- 
+new_rownames <- str_split_fixed(rownames(txi.transcriptLevel$abundance), pattern = "\\|", n = 2)[,1] 
+txi.transcriptLevel[c(1:3)] <- lapply(txi.transcriptLevel[c(1:3)],set_rownames, value=new_rownames)
+```
+
+```{r}
+lapply(txi.transcriptLevel[c(1:3)], function(x) head(x[,1:5]))
+lapply(txi.transcriptLevel[c(1:3)], function(x) tail(x[,1:5]))
+
+sapply(txi.transcriptLevel[c(1:3)], dim)
+```
+
+```{r}
+# saveRDS(txi.transcriptLevel$abundance,
+#           "TARGET_AML_RBD_Relapse_Kallisto_Quant_TranscriptLevel_Abundance_TPM.RDS")
+# 
+# saveRDS(txi.transcriptLevel$counts,
+#           "TARGET_AML_RBD_Relapse_Kallisto_Quant_TranscriptLevel_scaledTPM_counts.RDS")
+# 
+# saveRDS(txi.transcriptLevel$length,
+#           "TARGET_AML_RBD_Relapse_Kallisto_Quant_TranscriptLevel_scaledTPM_length.RDS")
+```
+
+
+
+
+
+#SessionInfo
+
+```{r}
+sessionInfo()
+```
+

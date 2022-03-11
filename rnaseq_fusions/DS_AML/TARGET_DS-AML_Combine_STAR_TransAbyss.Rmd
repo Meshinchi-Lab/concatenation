@@ -1,0 +1,481 @@
+---
+title: "Combine Fusion Files for DS-AML"
+author: "Jenny Smith"
+date: "Nov 9, 2020"
+output: html_document
+---
+
+#Set-up 
+
+```{r setup}
+library(knitr)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,"2018.08.06_DS.AML_DEGs/RBD_08B1_1531"))
+
+
+
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.width = 10, fig.height = 10)
+
+
+options(stringsAsFactors = FALSE)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+library(tidyr)
+getwd()
+```
+
+#Define Functions
+
+```{r}
+source("~/scripts/conversion_scripts/Merge_Cat_FixDupIDs_Function.r")
+source("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2018.05.15_Intra-Inter_Chromasomal_Fusion_Verification/Query_FusionDBs_for_Aliases.R")
+source(file.path(SCRIPTS,"RNAseq_Analysis/Analysis/Fusions_Analysis/Annotate_Fusions_Function.r"))
+```
+
+```{r}
+Combine_Fusion_Callers <- function(star, ta,usi){
+    
+    print(c("starting ",usi))
+  
+    sub.star <- star %>%
+      filter(Patient == usi) %>%
+      set_colnames(paste0(colnames(.), ".STAR")) 
+    
+    sub.ta <-  ta %>%
+      filter(Patient == usi) %>%
+      set_colnames(paste0(colnames(.), ".TA"))
+    
+    #Create dummy columns as place-holders for star data to be added.
+    sub.ta[,setdiff(colnames(sub.star), colnames(sub.ta))] <- NA
+
+    #Define the Fusions
+    fusions <- unique(c(unlist(sub.star$Fusion.Category.STAR), unlist(sub.ta$Fusion.Category.TA)))
+    
+    print(c("Combinging ", length(fusions), "fusions."))
+        
+    #For loop to compare each fusion called
+    for (fus in fusions){
+      # print(fus)
+
+      idx.star <- grep(fus, sub.star$Fusion.Category.STAR)
+      idx.ta <- grep(fus, sub.ta$Fusion.Category.TA)
+
+      #If fusion is only in TA
+      if (all(length(idx.ta) == 1 & length(idx.star) == 0)) {
+        #all columns for star are NAs , essentially no change from original.
+        sub.ta[idx.ta, colnames(sub.star)] <- NA
+
+      #if fusion is in STAR only
+      }else if (all(length(idx.ta) == 0 & length(idx.star) == 1)){
+
+        #add a new row with the fusion information
+        new_row <- nrow(sub.ta)+1
+        sub.ta[new_row, ] <- NA
+        sub.ta[new_row, colnames(sub.star)] <- sub.star[idx.star, ]
+
+      #else if fusion is in both star and TA, update the star columns
+      }else if (all(length(idx.star) == 1 & length(idx.ta) == 1)){
+        sub.ta[idx.ta, colnames(sub.star)] <- sub.star[idx.star,]
+      }
+    }
+
+  # res <- list(star=sub.star,ta=sub.ta, uniq.fus=fusions)
+  return(sub.ta)
+
+}
+```
+
+
+#Read in the manifest
+
+```{r}
+manifest <- read.csv(file.path(TARGET,"SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_10.08.20.csv"))
+
+dim(manifest) #2646   15
+head(manifest)
+```
+
+
+#Read in the Fusion Data
+
+```{r}
+STAR <- read.csv("Fusions_Data/TARGET_AML_DS-AML_STAR_Fusion_reformatted_FilteredForNBM_PrimaryFusions_7.11.2020.csv") %>% 
+  select(-c(Group:Time_point))
+
+head(STAR)
+# tail(STAR)
+# dim(STAR) #418  46
+```
+
+```{r}
+TA <- read.csv("Fusions_Data/TARGET_DS-AML_TransAbyss_Fusions_reformatted_FilteredForNBM_PrimaryFusions_9.24.19.csv")%>%
+  select(-c(Protocol:Group)) %>% 
+  mutate(Patient=gsub("-","\\.", Patient),
+         Fusion.Category=gsub("NonePassedFilter-NonePassedFilter","NonePassedFilter", Fusion.Category))
+
+head(TA)
+# dim(TA) #2092   39
+```
+
+
+#Merge the data frames
+
+```{r}
+USIs <- unique(TA$Patient)
+length(USIs) #228 samples
+```
+
+```{r}
+combined <- lapply(USIs, Combine_Fusion_Callers, star=STAR, ta=TA) %>%
+  bind_rows(.)
+
+head(combined[1:5,])
+dim(combined) #2416   80
+# 
+# write.csv(combined, file="TARGET_DS-AML_Combined_STAR_TransAbyss_FusionCalls_raw.csv")
+```
+
+
+```{r}
+combined.clean <- combined %>%
+
+  #Clean up the data columns that are identical between the two. Could have fixed in teh function, but maybe later. 
+
+  mutate(USI = case_when(
+    is.na(USI.TA) & ! is.na(USI.STAR) ~ USI.STAR,
+    ! is.na(USI.TA)  ~ USI.TA)) %>%
+  mutate(Patient = case_when(
+    is.na(Patient.TA) & ! is.na(Patient.STAR) ~ Patient.STAR,
+    ! is.na(Patient.TA) ~ Patient.TA)) %>%
+   mutate(Type = case_when(
+    is.na(Type.TA) & ! is.na(Type.STAR) ~ Type.STAR,
+    ! is.na(Type.TA)  ~ Type.TA)) %>%
+  mutate(Fusion.Category = case_when(
+    is.na(Fusion.Category.TA) & ! is.na(Fusion.Category.STAR) ~ Fusion.Category.STAR,
+    ! is.na(Fusion.Category.TA) ~ Fusion.Category.TA)) %>%
+  mutate(All_Fusions_Called = case_when(
+    !is.na(Fusion.TA) ~ Fusion.TA,
+    !is.na(X.Fusion.STAR) ~ X.Fusion.STAR)) %>%
+
+  
+  #Remove unnessary columns
+  select(-matches("Patient.[ST]|Group.[ST]|USI.[ST]|Category.[ST]"), 
+          -Type.TA, -Type.STAR,
+         -matches("forward|reverse"))  %>% 
+  
+  #Merge in the Group Column
+  left_join(.,select(manifest,Sample,Group, Protocol,Tissue),
+            by=c("Patient"="Sample")) %>% 
+
+  #order columns
+  select(USI, Patient,Group, Protocol,Tissue,
+         Type, Fusion.TA, X.Fusion.STAR, Fusion.Category,All_Fusions_Called,
+         breakpoint.TA, Breakpoints.STAR, Alternate.Breakpoints.TA, Alternate.Breakpoints.STAR,
+         spanning_reads.TA, breakpoint_pairs.TA, flanking_pairs.TA, SpanningRead.STAR, JunctionRead.STAR,
+         In_frame.TA,contains("size"), matches(".TA$"), matches(".STAR$")) %>%
+  arrange(Group)
+
+
+# combined.clean
+dim(combined.clean) # 2416   77
+
+sum(is.na(combined.clean$Patient))
+length(unique(combined.clean$Patient))
+```
+
+```{r}
+# write.csv(combined.clean, "TARGET_DS-AML_TransAbyss_STAR_FusionsDetected_Combined_11.11.20.csv", row.names = FALSE)
+```
+
+#Add Blacklist Annotations
+
+```{r}
+blacklist <- read.delim(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/blacklist.fusions.txt"))
+
+blacklist <- blacklist %>%
+  unite(GeneA.breakpoint, chrA, posA, sep=":", remove=FALSE) %>%
+  unite(GeneB.breakpoint, chrB, posB,sep=":", remove=FALSE ) %>%
+  mutate_at(vars(GeneA.breakpoint, GeneB.breakpoint), funs(gsub("chr","", .))) %>%
+  mutate(Breakpoint1=paste(GeneA.breakpoint,GeneB.breakpoint, sep="|")) %>%
+  mutate(Breakpoint2=paste(GeneB.breakpoint,GeneA.breakpoint, sep="|")) #for reciprocals. 
+
+head(blacklist)
+dim(blacklist) #7987   11
+```
+
+```{r}
+blacklist.fusionName <- blacklist %>%
+  filter(!grepl("^$", geneA), !grepl("^$",geneB), !is.na(geneB), !is.na(geneA))
+
+blacklist.fusionName <- apply(blacklist.fusionName, 1, fixCommas, col="geneA") %>%
+  bind_rows()
+
+blacklist.fusionName <- apply(blacklist.fusionName, 1, fixCommas, col="geneB") %>%
+  bind_rows() %>%
+  mutate(Fusion1=paste(geneA,geneB, sep="-")) %>%
+  mutate(Fusion2=paste(geneB,geneA, sep="-")) %>% #for reciprocals. 
+  unique(.)
+
+
+dim(blacklist.fusionName) #2736   14
+# head(blacklist.fusionName)
+```
+
+```{r}
+tictoc::tic()
+combined.clean.annot.bl <- combined.clean %>%
+  #Fix small differences in notation to be consistent. 
+  mutate_at(vars(contains("Alternate")), ~ifelse(grepl("^$", .), NA, .)) %>%
+
+
+  #Annotate out fusions with any of the breakpoints falling into the blacklist.
+  rowwise() %>%
+  mutate(FailedBlacklist_byBreakpoint=blacklistFusions(c1 = breakpoint.TA,
+                                       c2 = Breakpoints.STAR,
+                                       c3 = NA,
+                                       c4 = Alternate.Breakpoints.TA,
+                                       c5 = Alternate.Breakpoints.STAR,
+                                       c6 = NA,
+                                       df2.blacklist = blacklist, 
+                                       type = "Breakpoint")) %>%
+  
+  #Annotate the fusions based on the gene symbol to catch more.
+  mutate(FailedBlacklist_byFusionName=blacklistFusions(c1 = All_Fusions_Called,
+                                       c2 = NULL,
+                                       c3 = NULL,
+                                       c4 = NULL,
+                                       c5 = NULL,
+                                       c6 = NULL,
+                                       df2.blacklist = blacklist.fusionName,
+                                       type="Fusion")) %>%
+  ungroup() 
+
+
+tictoc::toc() #9.703 sec elapsed
+```
+
+```{r}
+sum(!is.na(combined.clean.annot.bl$FailedBlacklist_byBreakpoint))  #30
+sum(!is.na(combined.clean.annot.bl$FailedBlacklist_byFusionName)) #653
+```
+
+```{r}
+length(unique(combined.clean.annot.bl$Patient)) #228
+dim(combined.clean.annot.bl) # 2416   80
+# head(combined.clean.annot)
+```
+
+```{r}
+# write.csv(combined.clean.annot.bl, "TARGET_AML_DS-AML_Combined_STAR_TransAbyss_FusionCalls_AnnotatedBlacklist_11.11.20.csv")
+```
+
+
+#Add DB Annotations 
+
+```{r}
+#Fusion databases, like Mitelman and TicDB
+dbs <-  readRDS(file.path(PROJHOME,"2018.09.11_Combine_Fusion_Calls/Fusion_Reference/Fusion_ReferenceFiles_10.8.18.RDS"))
+
+length(dbs)
+
+gene_aliases <- read.csv(file.path(PROJHOME, "0000.00.02_Reference_GeneInfo/Homo_sapiens.gene_info.alias.csv"),
+                         header = TRUE) %>% 
+  mutate_at(vars(Synonyms),~gsub("^\\-$|^$", NA, .)) %>% 
+  unite(alias, Symbol,Synonyms, sep="|", remove = F, na.rm=TRUE) %>% 
+  mutate(alias=toupper(alias))
+
+
+head(gene_aliases)
+```
+
+```{r}
+fusions_df <- combined.clean.annot.bl %>% 
+  select(Fusion.Category) %>% 
+  unique()
+
+fusions_df #943
+```
+
+```{r}
+future::plan("multisession")
+future::plan()
+```
+
+```{r}
+tictoc::tic()
+
+annots <- furrr::future_map_dfr(1:nrow(fusions_df), 
+                                function(i)
+                                  
+                                  fusions_df[i,] %>%  
+                                  
+                                  mutate(Present_inFusionCancer_byFusionName=AnnotFusions(c1 = Fusion.Category,
+                                                          df2.annot = dbs$db_fusionCancer,
+                                                          alias.df = gene_aliases)) %>%
+  
+                                  mutate(Present_inMitelman_byFusionName=AnnotFusions(c1 = Fusion.Category,
+                                                                                      df2.annot = dbs$db_mitelman,
+                                                                                      alias.df = gene_aliases)) %>%
+                                  
+                                  mutate(Present_inTicdb_byFusionName=AnnotFusions(c1 = Fusion.Category,
+                                                                                   df2.annot = dbs$db_ticdb,
+                                                                                   alias.df = gene_aliases)) %>%
+                                  
+                                  mutate(Present_inCOSMIC_byFusionName=AnnotFusions(c1 = Fusion.Category,
+                                                                                    df2.annot = dbs$db_cosmic,
+                                                                                    alias.df = gene_aliases)) %>%
+                                  
+                                  mutate(Present_inTumorFusion_byFusionName=AnnotFusions(c1 = Fusion.Category,
+                                                                                         df2.annot = dbs$db_tumorFusion,
+                                                                                         alias.df = gene_aliases)) %>%
+                                  
+                                  #Other Annotation Columns
+                                  mutate(CancerType_inFusionCancer_byFusionName=AnnotFusions(c1 = Fusion.Category,
+                                                                                             df2.annot = dbs$db_fusionCancer,
+                                                                                             alias.df = gene_aliases,
+                                                                                             col2 = "Cancer_type")) %>%
+                                  
+                                  mutate(Morphology_inMitelman_byFusionName=AnnotFusions(c1 = Fusion.Category,
+                                                                                         df2.annot = dbs$db_mitelman,
+                                                                                         alias.df = gene_aliases,
+                                                                                         col2="Morphology")) %>%
+                                  
+                                  mutate(FAB_inMitelman_byFusionName=AnnotFusions(c1 = Fusion.Category,
+                                                                                  df2.annot = dbs$db_mitelman,
+                                                                                  alias.df = gene_aliases,
+                                                                                  col2="FAB_Type")) %>%
+                                  
+                                  mutate(CancerType_inCOSMIC_byFusionName=AnnotFusions(c1 = Fusion.Category,
+                                                                                       df2.annot = dbs$db_cosmic,
+                                                                                       alias.df = gene_aliases,
+                                                                                       col2="Primary.histology")) %>%
+                                  
+                                  mutate(CancerType_inTumorFusion_byFusionName=AnnotFusions(c1 = Fusion.Category,
+                                                                                            df2.annot = dbs$db_tumorFusion,
+                                                                                            alias.df = gene_aliases,
+                                                                                            col2="Cancer")),
+.progress = TRUE)
+
+tictoc::toc() #338.558 sec elapsed
+dim(annots)
+
+annots
+```
+
+```{r}
+# lapply(select(annots, Present_inFusionCancer_byFusionName:CancerType_inTumorFusion_byFusionName),
+#       function(x) table(!is.na(x))) #50/943 are in Mitelman DB
+```
+
+```{r}
+combined.clean.annot <- combined.clean.annot.bl %>% 
+  left_join(., annots, by="Fusion.Category") %>% 
+  mutate(Both_Callers=ifelse(!is.na(Fusion.TA) & !is.na(X.Fusion.STAR), TRUE, FALSE))%>%
+  
+  rowwise() %>% 
+  mutate(In_Fusion_Database=sum(!is.na(c_across(Present_inFusionCancer_byFusionName:Present_inTumorFusion_byFusionName)))) %>% 
+  ungroup() %>% 
+  select(USI:Tissue,Both_Callers,In_Fusion_Database, everything())
+
+length(unique(combined.clean.annot$Patient)) #228
+dim(combined.clean.annot) #2416   90
+head(combined.clean.annot)
+```
+
+```{r}
+write.csv(combined.clean.annot, "TARGET_AML_DS-AML_Combined_STAR_TransAbyss_FusionCalls_Annotated_11.11.20.csv", row.names = F)
+```
+
+
+
+##Split into Inter and Intra chromosomal Fusions
+
+```{r}
+intra <- combined.clean.annot %>%
+    filter(grepl("intrachromosomal|NoneDetected|NonePassedFilter", Type)) 
+
+dim(intra)
+
+# write.csv(intra, "TARGET_DS-AML_TransAbyss_STAR_FusionsDetected_Combined_Intrachromosomal_11.11.20.csv", row.names = FALSE)
+```
+
+
+```{r}
+inter <- combined.clean.annot %>%
+    filter(grepl("interchromosomal|NoneDetected|NonePassedFilter", Type)) 
+
+dim(inter)
+# 
+# write.csv(inter, "TARGET_DS-AML_TransAbyss_STAR_FusionsDetected_Combined_Interchromosomal_11.11.20.csv", row.names = FALSE)
+```
+
+#Possible True fusions
+
+```{r}
+high_confidence <- combined.clean.annot %>%
+  mutate(Both_Callers=ifelse(!is.na(Fusion.TA) & !is.na(X.Fusion.STAR), TRUE, FALSE))%>%
+  
+  rowwise() %>% 
+  mutate(In_Fusion_Database=sum(!is.na(c_across(Present_inFusionCancer_byFusionName:Present_inTumorFusion_byFusionName)))) %>% 
+  ungroup() %>% 
+  
+  # filter(Both_Callers == TRUE | In_Fusion_Database > 0) %>% 
+  # filter(is.na(FailedBlacklist_byFusionName)) %>% 
+  select(USI:Tissue,Both_Callers,In_Fusion_Database, everything())
+
+
+
+table(high_confidence$Both_Callers, high_confidence$Type)
+table(high_confidence$In_Fusion_Database, high_confidence$Type)
+# table(high_confidence$FailedBlacklist_byBreakpoint,useNA = 'ifany')
+# table(high_confidence$FailedBlacklist_byFusionName,useNA = 'ifany')
+
+dim(high_confidence)
+```
+
+```{r}
+high_confidence %>% 
+  group_by(Fusion.Category,Type,Both_Callers,In_Fusion_Database) %>% 
+  summarise(N=n()) %>% 
+  arrange(Type,Fusion.Category,desc(N)) %>% 
+  filter(Fusion.Category != "NonePassedFilter")
+```
+
+RAF1-TMEM40
+size: 159,041 to 173,037 pb
+Acute lymphoblastic leukemia/lymphoblastic lymphoma		t(3;3)(p25;p25)	RAF1/TMEM40	B-Lineage	Gu et al 2016, Nat Commun
+Adenocarcinoma	Kidney	t(3;3)(p25;p25)	RAF1/TMEM40		Yoshihara et al 2015, Oncogene
+breakpoint: 3:12632297|3:12805335
+
+
+C10orf68-CCDC7
+size: 91,857 to 101,513 bp 
+10:32832228|10:32933760
+Adenocarcinoma	Prostate	t(10;10)(p11;p11)	CCDC7/CCDC7		Yoshihara et al 2015, Oncogene
+
+
+CSNK1G2-DOT1L
+size: 248,313bp
+19:1941417|19:2189731
+breakpoint: Adenocarcinoma	Uterus, corpus	dup(19)(p13p13)	DOT1L/CSNK1G2		Kandoth et al 2013, Nature
+
+
+```{r}
+filter(high_confidence, Fusion.Category=="RAF1-TMEM40") %>% 
+  select(1:7, matches("size"), everything())
+```
+
+
+#Session Info
+
+```{r}
+sessionInfo()
+```
+
+
+

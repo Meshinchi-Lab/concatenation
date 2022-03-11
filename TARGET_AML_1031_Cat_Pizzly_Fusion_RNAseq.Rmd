@@ -1,0 +1,248 @@
+---
+title: "Concatenate Pizzly Fusion RNA-seq"
+author: "Jenny Smith"
+date: "April 6, 2018"
+output: html_document
+---
+
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 8, fig.width = 10)
+knitr::opts_knit$set(root.dir = '/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2018.04.06_Cat_Pizzly_Fusion/')
+```
+
+
+```{r message=FALSE}
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(stringr)
+library(reshape2)
+library(tidyr)
+getwd()
+```
+
+```{r}
+source("~/scripts/conversion_scripts/Merge_Cat_FixDupIDs_Function.r")
+```
+
+
+#Define Functions to be used. 
+
+```{r}
+#https://stackoverflow.com/questions/32040742/dplyrselect-including-all-other-columns-at-end-of-new-data-frame-or-beginni
+
+addCols <- function(df,id){
+  library(dplyr)
+  
+  df <- as.data.frame(df) %>%
+    mutate(gene_id=id) %>%
+    select(gene_id, everything())
+  
+  return(df)
+}
+```
+
+
+#Identify Files to Be Concatenated
+
+```{r}
+# filepath <-  "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level2/fusion/2017July_BCCA_1031_Kallisto_Illumina_data/"
+filepath.0531 <-  "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level2/fusion/2016Apr_BCCA_Kallisto_Illumina_data/"
+
+# allfiles <- dir(path = filepath, 
+#                 pattern = ".+withJunctionsOnGenome.+txt") 
+
+allfiles.0531 <- dir(path = filepath.0531, 
+                pattern = ".txt")
+
+head(allfiles)
+```
+
+```{r}
+length(allfiles.0531) 
+```
+
+```{r}
+#target matrix will have NBM, AML, and untreated cell line samples ("D1" == day 1)
+target <- grep("^[RBP][A-Z0-9]|\\-D1\\-", allfiles, value=TRUE) #1,113 samples 
+
+#cell line matrix will have Kasumis and MV411s treated and untreated.  
+cells <- grep("^Kas|MV4", allfiles, value=TRUE)  #6 samples
+```
+
+```{r}
+abund <- paste(filepath, target, sep="") 
+
+head(abund)
+```
+
+```{r}
+abund.cells <- paste(filepath, cells, sep="") #6 samples
+
+head(abund.cells)
+```
+
+
+
+#Columns Description
+
+geneA.name     
+geneA.id        
+geneB.name      
+geneB.id     
+paircount       
+splitcount      
+transcripts.list
+
+#Begin Concatenation 
+
+
+```{r}
+#Pattern to select the Target Barcode
+pattern <- "^.+\\/([BPRMK][A-Za-z0-9].+R)\\_.+"
+pattern.cells <- ".+\\/([KM][A-Za-z0-9].+R)\\_.+"
+```
+
+
+```{r results='hide', message=FALSE}
+filesWithPath <- list(abund,abund.cells )
+patterns <- list(pattern, pattern.cells)
+
+cated <- mapply(catRbind,filesWithPath, patterns, MoreArgs = list(header=TRUE), SIMPLIFY = FALSE)
+names(cated) <- c("TARGET", "Cells")
+```
+
+
+```{r}
+lapply(cated, head)
+```
+
+
+```{r}
+lapply(cated, dim)
+```
+
+```{r}
+cated.0531 <- catRbind(filenames = paste0(filepath.0531,allfiles.0531), regex = pattern, header=TRUE)
+```
+
+```{r}
+cated.0531 <- cated.0531 %>%
+  mutate(Patient=str_split_fixed(Patient,"\\/", n=6)[,6])
+
+head(cated.0531)
+```
+
+```{r}
+# write.csv(cated.0531, "TARGET_AML_0531_Pizzly_Fusion_RNASeq.csv", row.names = FALSE)
+```
+
+
+
+#Save the output
+
+```{r}
+# save(cated, file="TARGET_AML_1031_cat_trancriptLevel_rnaseq.RData")
+```
+
+
+```{r}
+
+for (i in 1:2){
+  n <- ifelse(names(cated)[i] == "TARGET",
+              "TARGET_AML_AAML1031_Pizzly_Fusion_RNASeq.csv", "Kasumi_MV4-11_Pizzly_Fusion_RNASeq.csv")
+  
+  write.csv(cated[[i]], n, row.names = FALSE)
+}
+
+```
+
+
+```{r}
+reformat.fusions <- function(df){
+  customCols <- c("Patient", "Fusion","All.Sense.Fusions.Found","All.Fusion.Exons","All.Genomic.Breakpoint.ReadPairs","All.Contig.Spanning.Reads", "All.Reading.Frames","All.BreakPoints", "All.Fusion.Sizes")
+  originalCols <- colnames(df)
+  
+  
+  df <- df %>% 
+    arrange(Patient) %>%
+    mutate(USI=str_split_fixed(Patient, "-", n=3)[,1]) %>%
+    mutate(Fusion.Detected=ifelse(is.na(genes), 0,1)) %>%
+    
+    mutate(brk1reads=as.numeric(str_split_fixed(breakpoint_pairs, ",", n=2)[,1]),
+           brk2reads=as.numeric(str_split_fixed(breakpoint_pairs, ",", n=2)[,2])) %>%
+    
+    dplyr::rowwise() %>%
+    mutate(FailedFilterFusions=filterFusions(Fusion.Detected, spanning_reads, brk1reads, brk2reads)) %>%
+    
+    ungroup() %>%
+    
+    dplyr::group_by(Patient) %>%
+    mutate(AllFail=ifelse(sum(FailedFilterFusions) == n(),"Yes","No")) %>%
+    mutate(Fusion.Detected=ifelse(AllFail == "Yes" ,0,Fusion.Detected)) %>%
+    
+    ungroup() %>%
+    
+    filter(Fusion.Detected == 0 | (spanning_reads >= 5 & (brk1reads >= 5 | brk2reads >= 5))) %>%  
+    #made the threshhold 5 bc using 6 (bases on Karen Mungalls choice) misses a true fusion for PAUHFI bases on karytype.
+    
+    mutate(Fusion=ifelse(! is.na(genes), paste(X5.gene, X3.gene, sep="-"), NA),
+           Exons=ifelse(! is.na(genes), paste(paste0(X5.gene,"exon",X5.exon),paste0(X3.gene,"exon",X3.exon), sep="-"), NA),
+           FusionFrame=ifelse(! is.na(genes), paste(Fusion, frame,"frame", sep="_"), NA)) %>%
+    
+    # bind_cols(.,createMultiCols(.$Fusion, suffix=".sensefusion")) %>%
+
+    group_by(Patient) %>%
+    mutate(All.Sense.Fusions.Found=collapseRows(Fusion,uniq = FALSE),
+           All.Fusion.Exons=collapseRows(Exons, uniq = FALSE),
+           All.Genomic.Breakpoint.ReadPairs=collapseRows(breakpoint_pairs, uniq = FALSE),
+           All.Contig.Spanning.Reads=collapseRows(spanning_reads, uniq = FALSE),
+           All.BreakPoints=collapseRows(breakpoint, uniq = FALSE),
+           All.Fusion.Sizes=collapseRows(size, uniq = FALSE),
+           All.Reading.Frames=collapseRows(FusionFrame, uniq =FALSE)) %>%
+
+    ungroup() %>%
+    select(USI,customCols, setdiff(colnames(.), c(customCols,originalCols)),originalCols, -brk1reads, -brk2reads,-Fusion.Detected,-FailedFilterFusions) %>%
+    
+    rowwise() %>%
+    mutate_at(vars(3:NCOL(.)), funs(ifelse(AllFail == "Yes",NA,  .))) %>%
+    mutate_all(funs(replace(., is.na(.), "NonePassedFilter")))
+    
+ 
+  return(df)
+}
+```
+
+
+#Filter Fusions 
+
+
+```{r}
+fusions <- read.csv("TARGET_AML_AAML1031_Pizzly_Fusion_RNASeq.csv",
+                    stringsAsFactors = FALSE)
+head(fusions)
+```
+
+
+```{r}
+
+```
+
+
+
+NOTE:
+
+If markdown cannot be completed with pandoc (memory issues), use the following
+
+> library("rmarkdown")
+> render("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/TARGET_AML_1031_Cat_RNAseq.Rmd", "html_document")
+
+
+#Session Info
+
+```{r}
+sessionInfo()
+```
+

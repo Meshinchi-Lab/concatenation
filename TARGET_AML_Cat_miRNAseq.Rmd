@@ -1,0 +1,217 @@
+---
+title: "Concatenate miRNAseq"
+output: html_document
+---
+
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 8, fig.width = 10)
+knitr::opts_knit$set(root.dir = '~/miRNAseq_Analysis/analysis/2017.10.18_Cat_miRNAseq/')
+```
+
+```{r message=FALSE}
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(stringr)
+library(reshape2)
+getwd()
+```
+
+```{r}
+source("~/scripts/ConversionScripts/Merge_Cat_FixDupIDs_Function.r")
+```
+
+
+#Define Functions to be used 
+
+```{r}
+#https://stackoverflow.com/questions/32040742/dplyrselect-including-all-other-columns-at-end-of-new-data-frame-or-beginni
+
+addCols <- function(df,mir){
+  library(dplyr)
+  
+  df <- df %>%
+    mutate(mir=mir) %>%
+    select(mir, everything())
+  
+  return(df)
+}
+```
+
+
+
+#Read in file names
+
+```{r}
+path <- "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/miRNAseq/BCCA_Data_Downloads/2017July_BCCA_SOW.GSC1483_MatureMiRNA_matrices/renamed"
+
+allfiles <- dir(path = path,pattern = ".txt") %>%
+  grep("README", ., invert=TRUE, value=TRUE)
+
+head(allfiles) #2282
+```
+
+```{r}
+#target matrix will have NBM, AML, and untreated cell line samples ("D1" == day 1)
+target <- grep("^[RBP][A-Z0-9]|\\-D1\\-", allfiles, value=TRUE) 
+
+#cell line matrix will have Kasumis and MV411s treated and untreated.  
+cells <- grep("^Kas|MV4", allfiles, value=TRUE) 
+```
+
+
+```{r}
+idx <- grepl("norm", target)
+
+raw <- paste(path, target[! idx], sep="/") #1,137 samples
+norm <- paste(path, target[idx], sep="/") #1,137 samples
+
+head(norm)
+```
+
+```{r}
+id <- grepl("norm", cells)
+raw.cells <- paste(path, cells[!id], sep="/") #6 samples
+norm.cells <- paste(path, cells[id], sep="/") #6 samples
+
+head(norm.cells)
+```
+
+
+
+
+#Column Description 
+
+
+miRNA expression matrices 
+
+The file names of the expression matrices in the expn_matrix subdirectory include the sub-library as well as the miRNA protocol used as a way to differentiate miRNA 3 expression from miRNA 4 expression.
+    
+Tab separated expression matrices used for dissemination are found in the expn_matrix sub-directory.  The column is external identifier (e.g. E11/185) and rows are mature-strand miRNAs 
+       
+*expn_matrix_mimat_<protocol>_<library_name>.txt*: raw count of the number of reads aligned to miRNA mature strands for each sample, 0 represents 0 reads aligned to a particular miRNA. Cross-mapped reads are counted once for each miRNA they align to:
+        
+*expn_matrix_mimat_norm_<protocol>_<library_name>.txt*: same as expn_matrix_mimat_<protocol>_<library_name>.txt except the raw read counts are divided by the total number of miRNA reads for each library multiplied by 1,000,000 (reads per million; RPM)
+
+
+#Begin Concatenation 
+
+```{r}
+#Pattern to select the Target Barcode
+pattern <- "^.+\\/([BPR][A-Z0-9].+R)\\_.+"
+
+pattern.cells <- ".+\\/([KM][A-Za-z0-9].+R)\\_.+"
+```
+
+```{r}
+#Select the column indices 
+selected <- c(1,2)
+```
+
+
+#TARGET 
+
+```{r message=FALSE, results='hide'}
+cated <- lapply(list(raw,norm), catExpnData, regex=pattern, cols=selected, header=TRUE) %>%
+  set_names(c("raw","norm"))
+```
+
+```{r}
+lapply(cated$raw, function(x) head(x[,1:5]))
+sapply(cated$raw,dim) %>% set_rownames(c("mirs", "samples")) #2,576 miRNAs and 1137 Samples
+names(cated$raw) <- c("mir", "count")
+```
+
+
+```{r}
+lapply(cated$norm, function(x) head(x[,1:5]))
+sapply(cated$norm,dim) %>% set_rownames(c("mirs", "samples"))
+names(cated$norm) <- c("mir", "RPM")
+```
+
+#Cell Lines
+
+```{r results='hide'}
+cated.cells <- lapply(list(raw.cells, norm.cells), catExpnData, regex=pattern.cells, cols=selected, header=TRUE) %>%
+  set_names(c("raw", "norm"))
+```
+
+```{r}
+lapply(cated.cells$raw, function(x) head(x[,1:5]))
+sapply(cated.cells$raw,dim) %>% set_rownames(c("mirs", "samples")) #2,576 miRNAs and 6 Samples
+names(cated.cells$raw) <- c("mir", "count")
+```
+
+```{r}
+lapply(cated.cells$norm, function(x) head(x[,1:5]))
+sapply(cated.cells$norm,dim) %>% set_rownames(c("mirs", "samples")) #2,576 miRNAs and 6 Samples
+names(cated.cells$norm) <- c("mir", "RPM")
+```
+
+
+
+#Check that the MIMAT IDs are in the Same Order
+
+```{r}
+all(sapply(cated,function(x) sapply(x$mir, identical, y=x$mir$`BM3897-09A-01R`)))
+```
+
+```{r}
+all(sapply(cated.cells, function(x) sapply(x$mir, identical, y=x$mir$`Kasumi-AZA-D11-03A-01R`)))
+```
+
+
+#Add columns for the MIMAT ID 
+
+
+```{r}
+withCols <- lapply(cated, function(x) addCols(x[[2]],mir=x$mir$`BM3897-09A-01R`))
+
+lapply(withCols, function(x) head(x[,1:5]))
+```
+
+
+```{r}
+withCols.cells <- lapply(cated.cells, function(x) addCols(x[[2]], mir=x$mir$`Kasumi-AZA-D11-03A-01R`))
+
+lapply(withCols.cells, function(x) head(x[,1:5]))
+```
+
+
+#Save the output
+
+```{r}
+save(cated, file="TARGET_AML_AAML1031_expn_matrix_mimat_miRNA.RData")
+save(cated.cells, file="Kasumi_MV4-11_expn_matrix_mimat_norm_miRNA.RData")
+```
+
+```{r}
+type <- c("raw","norm")
+
+for (t in type){
+  suffix <- ifelse(t == "raw", "rawCounts", "RPM")
+  n1 <- paste0("TARGET_AML_AAML1031_expn_matrix_mimat_miRNA_", suffix,".csv")
+  write.csv(withCols[[t]], n1, row.names = FALSE)
+  
+  n2 <- paste0("Kasumi_MV4-11_expn_matrix_mimat_miRNA_", suffix,".csv")
+  write.csv(withCols.cells[[t]], n2, row.names = FALSE)
+}
+```
+
+
+
+#Session Information
+
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
+

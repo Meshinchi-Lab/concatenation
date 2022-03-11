@@ -1,0 +1,198 @@
+---
+title: "Cluster Discrepant (by SNP genotyping) Samples"
+author: "Jenny Smith"
+date: "11/14/19"
+output: html_document
+---
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, 
+                      fig.align='center', fig.width = 10, fig.height = 10)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,"2017.10.09_Concatenate_1031_RNAseq/"))
+options(stringsAsFactors = FALSE,bitmapType = 'cairo', device='x11')
+grDevices::X11.options(type='cairo')
+```
+
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(Cairo)
+library(gridExtra)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(readr)
+library(DeGSEA)
+getwd()
+```
+
+
+#Raw Counts
+
+```{r}
+AML.NBM.only <- TRUE
+```
+
+
+```{r}
+TPM <- read_csv(file.path(HOME,"0000.00.03_Expression_Matrices/TARGET_AML_0531_1031_Ribodepleted_RNAseq_dupGenesRemoved_TPM.csv"))
+
+if(AML.NBM.only){
+  #remove cell lines, MPN, flow sorted and replicate samples
+  TPM <- TPM[,-grep("Kas|MV4|MPN[0-9]|Sort|replicate", 
+                            colnames(TPM), ignore.case = TRUE)]
+  #Set-rownames
+  TPM <- column_to_rownames(TPM, "X1")
+  
+  #change to only USI for colnames
+  colnames(TPM) <- str_split_fixed(colnames(TPM),  "\\.", 5)[,3]
+
+}
+  
+dim(TPM) #51573  1460
+head(TPM[,1:5])
+```
+
+```{r}
+TPM.rel <- read_csv(file.path(HOME,"0000.00.03_Expression_Matrices/TARGET_0531_1031_Relapse_Ribodepleted_RNAseq_geneLevel_TPM.csv"))
+                    
+TPM.rel <- TPM.rel[,-grep("Kas|MV4|MPN[0-9]|Sort|replicate|K562|CGSH|NOMO1|MO7E|ME1|PAXLWH", 
+                            colnames(TPM.rel), ignore.case = TRUE)]
+# TPM.rel <- column_to_rownames(TPM.rel, "geneSymbol")
+head(TPM.rel[,1:5])   
+dim(TPM.rel) #58450   520
+```
+
+
+#ClinData
+
+```{r}
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_9.4.19.csv"))
+
+merged <- merged %>% 
+  filter(!is.na(USI)) %>% 
+  set_rownames(.$USI)
+
+
+head(merged[,1:5])
+```
+```{r}
+manifest <- read.csv(file.path(TARGET,"SequencingDataMatrix/TARGET_AML_RBD_0531_1031_miRNAseq_mRNAseq_Manifest_v5.csv"))
+
+head(manifest)
+```
+
+```{r}
+rel.manifest <- read.csv(file.path(TARGET,"SequencingDataMatrix/TARGET_AML_RBD_Relapse_Manifest_v4.csv"),
+                     row.names = 1) %>% 
+  mutate(Colnames=gsub("-", "\\.", Sample.ID))
+
+# head(manifest)
+sum(rel.manifest$GSC.library=="") # 8 samples without RNAseq delivered
+dim(rel.manifest)
+```
+
+From: "Smith, Jenny L" <jlsmith3@fredhutch.org>
+Date: Tuesday, June 11, 2019 at 4:48 PM
+To: Patrick Plettner <pplettner@bcgsc.ca>, "Leonti, Amanda R" <aleonti@fredhutch.org>, "Meshinchi, Soheil" <smeshinc@fredhutch.org>, "Ries, Rhonda E" <rries@fredhutch.org>
+Cc: Eric Chuah <echuah@bcgsc.ca>, Andy Mungall <amungall@bcgsc.ca>, Tina Wong <twong@bcgsc.ca>, Richard Moore <rmoore@bcgsc.ca>, Yongjun Zhao <yzhao@bcgsc.ca>, Marc Calingo <mcalingo@bcgsc.ca>, Young Cheng <ycheng@bcgsc.ca>
+Subject: RE: Analysis Data on SFTP SOW GSC-1669: Soheil Meshinchi (DATA-80)
+
+Thanks for the summary files. Could you provide a quick  update about the remaining samples? We submitted 551 samples for sequencing and received 500 quantification and fusion files so far.  
+ 
+----------------------
+
+Of the 51 remaining files, 36 samples are planned for dissemination this week and should be available Friday at the latest. 
+
+The remaining 14 have SNP concordance issues and we are waiting on information from Soheil and Rhonda on how to proceed with those samples.
+
+```{r}
+discrepant <- read.csv("List_of_discrepant_RNA_seq_samples_for_clustering.csv") %>% 
+  mutate(Colnames=gsub("-","\\.", Sample.ID))
+
+discrepant[,1:3]
+dim(discrepant) #13  8
+```
+
+```{r}
+# "PAPVCN" %in% manifest$USI
+# "PAPVCN" %in% rel.manifest$USI # TRUE
+
+# table(discrepant$USI %in% colnames(TPM)) #7 of them have RBD diagnostic RNA-seq 
+# table(discrepant$Colnames %in% colnames(TPM.rel)) #None have any relapse RBD RNA-seq
+table(discrepant$Cluster.they.should.fall.in,
+      discrepant$USI %in% colnames(TPM))
+
+# unique(discrepant$USI) # 4 USIs
+```
+
+#Unsupervised Clustering
+
+```{r}
+df.clustering <- merged %>% 
+  filter(grepl("CBFB-MYH11|NUP98-HOXA9|NUP98-KDM5A", Primary.Fusion.CNV) | 
+          grepl("KMT2A", Primary.Fusion.CNV) | grepl("RUNX1-RUNX1T1", Primary.Fusion.CNV)) %>% 
+  mutate(Discrepant=ifelse(USI %in% discrepant$USI, "Discrepant", "OK"), 
+         Primary.Fusion.CNV=ifelse(grepl("KMT2A", Primary.Fusion.CNV), "KMT2A", Primary.Fusion.CNV) %>% 
+           gsub("-","\\.", .)) %>% 
+  filter( USI %in% colnames(TPM)) %>%
+  set_rownames(.$USI)
+
+dim(df.clustering) #278 138
+
+table(df.clustering$Primary.Fusion.CNV,
+      df.clustering$Discrepant) #PAPVCN is NOT in the diagnostic  because both samples were in the relapse batch
+```
+
+```{r}
+filter(df.clustering, Discrepant != "OK")$USI
+```
+
+```{r}
+library(matrixStats)
+TPM.clust <- log2(TPM[, df.clustering$USI]+1)
+TPM.clust <- TPM.clust[rowSums(TPM.clust >= 1.0) >= 0.05*ncol(TPM.clust),]
+
+rv <- rowVars(as.matrix(TPM.clust))  
+sel <- order(rv, decreasing = T)[1:500]
+
+TPM.clust <- TPM.clust[sel,]
+
+dim(TPM.clust)
+```
+
+```{r}
+pca.res <- pca_custom(expnData = TPM.clust, 
+                      CDE = df.clustering,
+                      fillCol = "Primary.Fusion.CNV", 
+                      colorCol = "Discrepant",PC3 = TRUE,
+                      colorCode = list(fill=RColorBrewer::brewer.pal(5,"Set1") %>% 
+                                         set_names(unique(df.clustering$Primary.Fusion.CNV)),
+                                       color=c(Discrepant="black",OK="white")))
+```
+
+```{r fig.width=16, fig.height=6}
+grid.arrange(pca.res$plot.1, pca.res$plot.2, ncol=2)
+```
+
+```{r}
+cols <- c("Cytogenetic.Category.1","Cytogenetic.Category.2", "SNVs","Rare.Fusions","Discrepant")
+df.clustering[,cols]
+```
+
+```{r}
+anno <- create_HA_Labs_Hmap(expn=TPM.clust, geneList = rownames(TPM.clust),
+                            goi = rownames(TPM.clust)[1:20],CDE = df.clustering,cols = )
+```
+
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+

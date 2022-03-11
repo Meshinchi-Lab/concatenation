@@ -1,0 +1,858 @@
+---
+title: "Genes Highly Expressed in AML and Co-Expression Analysis"
+author: "Jenny Smith"
+date: "March 12, 2019"
+output: html_document
+---
+
+#Set-Up
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, 
+                      fig.align='center', fig.height = 10,
+                      fig.width = 10)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,'/2018.02.12_AML_Specific_Transcripts/'))
+options(stringsAsFactors=FALSE,  java.parameters = "-Xmx4g",
+        bitmapType = 'cairo',device='x11' )
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message=FALSE}
+# library(Cairo)
+
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(stringr)
+library(reshape2)
+library(tibble)
+library(tidyr)
+library(purrr)
+library(gridExtra)
+getwd()
+```
+
+
+#Define Functions
+
+```{r}
+#Function to collapse duplicate rows so that all information is retain and seperated by a semi-colon.
+collapseRows <- function(col, uniq=FALSE, split=FALSE,sep=""){
+  #designed for dplyr so that "col" paramter is a vector of that column. 
+  #Similar to collapseDuplicates(), but for fewer columns, plus preselection of columns. Where are collapseDuplicates() you don't need to know the exact column names before hand. 
+  require(stringr)
+  
+  if (uniq){
+    if(split){
+      col <- str_split(col, pattern = sep) %>% unlist() %>% unique()
+    }else{
+      col <- unique(col)
+    }
+  }
+  
+  col <- col[col != ""]
+  col <- col[!is.na(col)]
+  collapsed <- ifelse(all(is.na(col)), NA, paste(col, collapse = "; "))
+  return(collapsed)
+}
+```
+
+```{r}
+gene_protein_anno <- function(df,gene.name.col="gene", 
+                              ids2symbols=NULL,
+                              mart.37=NULL,
+                              mart.38=NULL,
+                              makeQuery=TRUE,
+                              attempts=5){
+  #Modified by J.Smith to include more on the Compartments. 
+  
+  #df is a dataframe with genes as rows. May be expression dataset or DE genes list. 
+  #ids2symbols can be NULL, NA, or a file path. NULL is for BCCA id mapping + backwards compatibility. 
+    #while NA is for forwards compatibility if you don't need a ID map like with Kallisto counts. 
+  #NOTE: ids2symbols must have the gene_names column be the first column!!
+  #gene.name.col is if any dataframe has an alternative column name for gene symbols (eg BCL2,TP53)
+  #gene.name.col CANNOT be gene_id.
+  
+  library(dplyr)
+  library(stringr)
+  library(tidyr)
+  suppressPackageStartupMessages(library(rDGIdb))
+  library(biomaRt) 
+  options(stringsAsFactors = FALSE)
+  
+  #Function for mining certain keywords from the compartemnts data
+  matchCompartment <- function(protein, gene, geneStableID, ref.df, keywords.regex){
+    
+    
+    if (any(protein %in% ref.df$V1)){ #if a ENSP ID is matched, then use that information preferentially
+      comp <- ref.df %>%
+        filter(V1 %in% protein ) %>% 
+        filter(grepl(keywords.regex, V4, ignore.case = TRUE)) %>%
+        #confidence score must be greater than or equal to 3 to be considered for annotation. add 3.14.19
+        filter(V7 >= 3) %>%
+        dplyr::select(V4)
+      
+      res <- rep("",length(protein))
+      res[protein %in% ref.df$V1] <- paste(unlist(unique(comp)),collapse="; ") 
+      
+    }else{ #if not, search for the gene symbol and ENSG ID
+      comp <- ref.df %>%
+        filter( V2 %in% toupper(gene) |  V2 %in% geneStableID ) %>% 
+        filter(grepl(keywords.regex, V4, ignore.case = TRUE)) %>%
+        #confidence score must be greater than or equal to 3 to be considered for annotation. add 3.14.19
+        filter(V7 >= 3) %>%
+        dplyr::select(V4)
+      
+      res <-  paste(unlist(unique(comp)),collapse="; ")
+    }
+    return(res)
+  }
+  
+  #Read in the external database information 
+  compartment_knowledge_data <- read.delim(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/Compartments_database","human_compartment_knowledge_full_3.5.21.tsv"),
+                                           sep = "\t",as.is = TRUE, header = FALSE)
+  
+  ADCs <- read.csv(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/ADC_and_CARTcell_Targets_Database_ADCReview_rmDups_clinicaltrialsGov.csv"), 
+                            as.is=TRUE)
+  
+  if(is.null(ids2symbols)){
+    # First, converts gene symbols present in data to gene stable IDs
+    ids2symbols <- read.csv(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo","GeneSymbol_Ensembl_ID_Conversion_GRCh37.69_FromBCCA.csv"),
+                            header = TRUE)
+    
+  }else if (is.na(ids2symbols)){
+    ids2symbols <- NA
+    
+  }else{
+    #if want a custom gene name to ensemble gene ID file. Can contain additional annotation like ADCs or drug targets.  
+    ids2symbols <- read.csv(ids2symbols,header = TRUE)
+    
+  }
+  
+    
+  # #rename the column containing the gene symbols/names 
+  # #this avoid conficlts with column names that are commonly used like gene_id, gene_name, etc
+  df <- df %>%
+    dplyr::select(geneSymbol=all_of(gene.name.col),everything())
+  
+  #if df already has ENSG ids for rownames, just rename the ENSG ID column
+  if(all(is.na(ids2symbols))){
+    print(paste("No ID mapping is performed, ids2symbols is ", ids2symbols))
+    
+  }else{
+    #merge in the ensembl gene IDs to the input DEGs dataframe
+    col <- colnames(ids2symbols)[1]
+    df <- df %>%
+      left_join(., ids2symbols, 
+                by=c(geneSymbol=col))
+  }
+    
+  #find which column has the ensemble IDs 
+  ensCol <- sapply(df, function(x) any(grep(pattern="^ENSG", x)))
+  ensCol <- names(which(ensCol))
+    
+  #Create a new column called geneStableID which contains the Ensembl gene IDs 
+  #this allows one to not re-name any columns in the input dataframe 
+    df <- df %>% 
+     mutate( geneStableID := !! as.name(ensCol))
+
+  
+  #Check that the ENSG ID doesnt have NAs if using a provided gene ID map.   
+  if(any(is.na(df$geneStableID) | is.null(df$geneStableID))){
+    print("NAs introduced in ID mapping. Check Reference is correct")
+    return(list("reference_used"=ids2symbols))
+  }
+  
+  
+  if(is.null(mart.37) & makeQuery){
+    # Uses gene stable IDs to query Ensembl for further info about the gene & associated transcripts, proteins etc.
+    # mart.92 <- mart2 <- biomaRt::useMart(biomart = "ensembl", dataset = "hsapiens_gene_ensembl",host = "http://apr2018.archive.ensembl.org")
+    mart.37 <- useEnsembl(biomart = "ENSEMBL_MART_ENSEMBL",
+                          dataset = "hsapiens_gene_ensembl",
+                          GRCh = 37)   #GRCh37 does not have TSL (transcript support level ). Can't use mirror with this GRCh parameter
+    #if biomartr still cannot load
+    if(!exists("mart.37")){
+      mart.37 <- readRDS(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/biomaRt.GRCh37.RDS"))
+      message("Cannot load GRCh37 from BiomaRt currently. Loaded older local version.")
+    }
+  }
+  
+  
+  if(is.null(mart.38) & makeQuery){
+    #try to load the database. Having a ton of SSL errors, but oddly sometimes it works
+    #the errors are new the Rstudio server and R v4.0.4
+    #I need to find a way to avoid this query step. its just too buggy and unreliable...
+    # https://github.com/grimbough/biomaRt/issues/31
+    #ugh honestly fuck biomaRt. I'm going to need to just use the rest API apparently. Which will take time to figure out. 
+    #I cant even get it to reliably load the goddamn mart object.... 
+    httr::set_config(httr::config(ssl_verifypeer = FALSE))
+    for(i in 1:attempts){
+      try(mart.38 <- useEnsembl("ensembl", 
+                                mirror = "uswest",
+                                dataset = "hsapiens_gene_ensembl"), silent = T)
+    }
+
+    #if biomartr still cannot loaded load an older saved version
+    if(is.null(mart.38)){
+      mart.38 <- readRDS(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/biomaRt.GRCh38.RDS"))
+      message("Cannot load GRCh38 from BiomaRt currently. Loaded older local version.")
+    }
+  }
+
+  #Query Biomart for protein information. 
+  attr.mart <-  c("ensembl_gene_id",
+                  "external_gene_name",
+                  "transcript_count",
+                  "ensembl_transcript_id", 
+                  "ensembl_peptide_id",
+                  "tmhmm", "tmhmm_start", "tmhmm_end") #"transcript_tsl",
+  
+  if(makeQuery){
+    #GRCh38 results
+    res.anno1 <- getBM(attributes = attr.mart,
+                       filters = "ensembl_gene_id",
+                       values = df$geneStableID,
+                       mart = mart.38)
+    #GRCh37 results
+    res.anno2 <- getBM(attributes = attr.mart,
+                       filters = "ensembl_gene_id",
+                       values = df$geneStableID,
+                       mart = mart.37)
+  }else{
+    #due to getBM() time-outs and useEnsembl() memory errors, the above query in real-time has become too burdensom
+    #instead use these files as the default for now on and will need to periodically update them.
+    
+    #This was not finished clearly.. Need to save a stable copy for use on Rhino/Gizmo due to SSL cert issues for everything...
+    # res.anno1 <- readRDS(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/")) %>% 
+    #   filter(ensemble_gene_id %in% df$geneStableID)
+    # 
+    # 
+    # res.anno2 <- readRDS(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/")) %>% 
+    #   filter(ensemble_gene_id %in% df$geneStableID)
+  }
+
+  #gene_id's which are in GRCh37 but NOT GRCh38 
+  g.idx <- which(! res.anno2$ensembl_gene_id %in% res.anno1$ensembl_gene_id)
+  
+  #update results by adding GRCh37 results to the GRCh38 dataframe
+  final.res <- res.anno1 %>%
+    bind_rows(., res.anno2[g.idx,])
+  
+  #protein_id's which are in GRCh37 but NOT GRCh38 
+  p.idx <- which(! res.anno2$ensembl_peptide_id %in% final.res$ensembl_peptide_id)
+  
+  #final update for protien ID by adding GRCh37 results to the GRCh38 dataframe (since CompartmentsDB uses ENSP IDs from GRCh37)
+  final.res <- final.res %>% 
+    bind_rows(.,res.anno2[p.idx,]) %>% 
+    arrange(ensembl_gene_id)
+  
+  #Rename columns for clarity
+  colnames(final.res) <- c("geneStableID",
+                          "external_gene_name",
+                          "Number_of_Transcripts",
+                          "Transcript_ID",
+                          "Ensembl_ProteinID",
+                          "Predicted_Transmembrane_Structure",
+                          "Start_TM_Region", "End_TM_Region") #"Ensembl_TSL",
+  
+  # groups by gene_id, then concatenates the start and stop positions of each transmembrane protein into 1 column
+  results_by_gene <- final.res %>%
+    mutate_at(vars(Start_TM_Region:End_TM_Region), ~as.character(.)) %>%
+    unite(TM_Protein_Regions, Start_TM_Region, End_TM_Region, sep = "-") %>%
+    
+    #combine TM regions by protien
+    group_by(geneStableID,Ensembl_ProteinID) %>%
+    mutate_at(vars(TM_Protein_Regions), ~collapseRows(., uniq = FALSE))  %>%
+    ungroup() %>%
+    
+    mutate_at(vars(TM_Protein_Regions), ~gsub("NA-NA",NA, .)) %>% 
+    mutate_at(vars(Number_of_Transcripts:TM_Protein_Regions), ~gsub("^$", NA, .)) %>% 
+    unique(.)
+  
+  # Adds expression data back onto the newly queried data and Annotate cellular compartments. 
+  results <- df %>% 
+    left_join(., results_by_gene, by = "geneStableID") %>%
+    group_by(geneSymbol) %>%
+    mutate(Cellular.Compartment_Membrane=matchCompartment(protein = Ensembl_ProteinID,
+                                                          gene = geneSymbol, 
+                                                          geneStableID = geneStableID,
+                                                          ref.df=compartment_knowledge_data,
+                                                          keywords.regex = c("extracellular|plasma membrane|transmembrane|Cell periphery")),
+           
+           Cellular.Compartment_Receptors=matchCompartment(protein = Ensembl_ProteinID,
+                                                           gene = geneSymbol,
+                                                           geneStableID = geneStableID,
+                                                           ref.df=compartment_knowledge_data,
+                                                           keywords.regex = c("receptor|EGFR"))) %>%
+    ungroup() %>% 
+    #change the original column name back 
+    dplyr::select(!! as.name(gene.name.col) := geneSymbol, everything()) #revert to original column name 
+  
+  #Identify small molecule inhibitors if available
+  DGI_Filter <- queryDGIdb(pull(results,gene.name.col), 
+                             geneCategories = c("CLINICALLY ACTIONABLE")) #for now, only this filter since no filters has soo many drugs that are not relevant
+  DGI_Final <- detailedResults(DGI_Filter) 
+                  
+  
+  #Append ADCs and Small Molecular Inhibitors to the results
+  #https://stackoverflow.com/questions/28399065/dplyr-join-on-by-a-b-where-a-and-b-are-variables-containing-strings
+  if(nrow(DGI_Final) < 1 ){
+    print("No Interactions in Drug Gene Database")
+    
+    #Merge in the ADC drugs
+    results <- results %>% 
+            left_join(., ADCs, 
+                by=setNames("Gene.symbol.of.target..Final.",gene.name.col)) %>% 
+            dplyr::select(all_of(gene.name.col), 
+                          everything())
+    
+  }else{
+    
+    #Collapse multiple drugs for 1 gene-target into a single row per gene-target. 
+    DGI_Final <- DGI_Final %>% 
+      group_by(Gene) %>% 
+      #collapse genes with multiple drugs into a single row
+      mutate_at(vars(Drug:PMIDs),
+                ~collapseRows(col = ., uniq = FALSE, sep="; ")) %>% 
+      ungroup()  %>%
+      dplyr::select(-SearchTerm) %>%
+      unique()
+    
+    #Merge in the ADC and Drug-Gene interactions
+    results <- results %>% 
+      left_join(., ADCs, 
+                by=setNames("Gene.symbol.of.ADC.target..Final.",gene.name.col)) %>%  
+      left_join(.,DGI_Final, 
+                by=setNames("Gene",gene.name.col)) %>% 
+      dplyr::select(all_of(gene.name.col), 
+                    everything())
+  }
+  
+
+  
+  return(results)
+}
+```
+
+
+# Gene ID References
+
+```{r}
+transcriptID.map.anno <- read.csv(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_TranscriptLevel_IDmap_1.18.20.csv"))
+
+dim(transcriptID.map.anno) #207826     22
+head(transcriptID.map.anno)
+```
+
+```{r}
+letters <- sapply(month.name, substr, start=1, stop=1) %>% 
+  paste(., collapse = "") 
+regex <- paste0("^[0-9]{1,2}\\-", "[", letters, "]")
+
+check <- transcriptID.map.anno %>% 
+  filter(grepl(regex, gene_name))
+
+check #OK doesnt look like any dates saved here. 
+```
+
+
+```{r}
+geneID.map <- transcriptID.map.anno %>% 
+  dplyr::select(ensembl_id=gene_id,gene_name,gene_type) %>% 
+  distinct() 
+
+
+dim(geneID.map)
+head(geneID.map) #59853     3
+```
+
+
+# Annotate Compartments DB, ADCs, DGIdb
+
+```{r}
+geneID.map.anno <- gene_protein_anno(df = geneID.map, 
+                                     gene.name.col = "gene_name",
+                                     ids2symbols = NA,
+                                     makeQuery = TRUE)
+
+```
+
+```{r}
+dim(geneID.map.anno)
+head(geneID.map.anno)
+# saveRDS(geneID.map.anno,"gencode.v29_RepBase.v24.01_anno_temp.RDS")
+```
+
+
+# Collapse to GeneLevel Annotations
+
+```{r}
+geneID.map.anno <- readRDS("gencode.v29_RepBase.v24.01_anno_temp.RDS")
+
+
+head(geneID.map.anno)
+# dim(geneID.map.anno) #153171     30
+
+# View(geneID.map.anno)
+```
+
+
+```{r}
+geneID.map.clean <- geneID.map.anno %>% 
+  # filter(gene_name %in% c("TNFRSF8","SDC1")) %>%
+  select(-external_gene_name,-c(Comments:NBM.Range..TPM.),-TM_Protein_Regions) %>%
+  distinct() %>% 
+  
+  group_by(ensembl_id) %>%
+  mutate(Ensembl_ProteinID_with_MembraneLocalization=case_when(
+    Cellular.Compartment_Membrane != "" ~ paste(Ensembl_ProteinID[Cellular.Compartment_Membrane != ""], 
+                                                collapse = "; "), 
+    TRUE ~ "")) %>% 
+  mutate_at(vars(Cellular.Compartment_Membrane, 
+                 Cellular.Compartment_Receptors,
+                 Ensembl_ProteinID_with_MembraneLocalization,
+                 Predicted_Transmembrane_Structure,
+                 Treatment.type, 
+                 Drug.treatment.symbol.or.trade.name,
+                 Development.sponsor,
+                 If.currently.in.clinical.trials..drug.trial.ID.number),
+            ~collapseRows(., uniq = T, split=T,sep="; ")) %>% 
+  ungroup() %>% 
+  
+  select(gene_name, 
+         gene_id=ensembl_id,
+         gene_type,
+         Predicted_Transmembrane_Structure, 
+         Ensembl_ProteinID_with_MembraneLocalization,
+         Cellular.Compartment_Membrane, Cellular.Compartment_Receptors,
+         Treatment.type,Drug.treatment.symbol.or.trade.name,
+         Development.sponsor,If.currently.in.clinical.trials..drug.trial.ID.number) %>% 
+  distinct()
+
+
+head(geneID.map.clean)
+dim(geneID.map.clean)
+```
+
+```{r}
+filter(geneID.map.clean, grepl("FUT3|PRAME$|CD70",gene_name))
+
+# filter(geneID.map.clean, grepl("[0-9]ENSP",Ensembl_ProteinID_with_MembraneLocalization))
+```
+
+
+# Uniprot Annotations 
+
+```{r}
+synonym_matcher <- function(synonymCol,sep=" "){
+  # print(synonymCol)
+  print(length(synonymCol))
+  genes <- str_split(synonymCol,pattern = " ") %>% 
+    unlist()
+  match <- genes[which(genes %in% geneID.map.clean$gene_name)]
+  
+  print(length(match))
+  
+  return(match)
+}
+```
+
+```{r}
+ref_genes <- unlist(geneID.map.clean$gene_name)
+
+uniprot_TMhelix <- read.delim("References/uniprot_Homo_sapiens_TMHelix.tab.txt", sep="\t") %>% 
+  arrange(Gene.names...primary..) %>% 
+  mutate(Uniprot_TMhelix=case_when(
+    grepl("Transmembrane helix", Keywords) ~ "TMhelix",
+    TRUE ~ ""),
+    Uniprot_CTA=case_when(
+      grepl("Cancer.Testis.Antigen", Protein.names, ignore.case = T) ~ "CTA",
+      TRUE ~ "" )) %>% 
+  
+  #The histones in this file are all basically identical and matching them will cause issues. 
+  filter(Gene.names...primary.. != "", !grepl("Histone", Protein.names))  %>% 
+  
+  #There are multiple gene symbols to one protein. So transform to long format. 
+  separate(Gene.names...primary.., into = paste0("gene_name", 1:10),
+           sep = "; ", remove = F) %>% 
+  gather(key = Var, value=gene_name, gene_name1:gene_name10) %>% 
+  filter(!is.na(gene_name)) %>% 
+  select(gene_name, everything(), -c(Protein.names:Helix ), -c(Keyword.ID:Domain..CC.),-Var) %>% 
+  distinct() %>% 
+  
+  #Try to rescue genes by synonyms 
+  #Holy cow - for some reason my function above wasnt accepting the grouped_df and instead I had to make that ugly string below AND 
+  #for reasons that make no sense, pipe it into paste to make it work. 
+  rowwise() %>%
+  dplyr::mutate(gene_name_final=case_when(
+    gene_name %in% ref_genes ~ gene_name,
+    !gene_name %in% ref_genes ~ 
+      unlist(str_split(Gene.names...synonym..,pattern = " "))[unlist(str_split(Gene.names...synonym..,pattern = " ")) %in% ref_genes] %>% paste(., collapse=";")
+    # !gene_name %in% ref_genes ~ unlist(str_split(Gene.names...synonym..,pattern = " ")) %>% paste(., collapse=";") #WORKS
+   )) %>% 
+  ungroup() %>%
+  filter(gene_name_final != "")  
+
+
+
+
+dim(uniprot_TMhelix) #19946     9
+# table(is.na(uniprot_TMhelix$gene_name))
+# table(duplicated(uniprot_TMhelix$gene_name_final))
+# table(uniprot_TMhelix$Uniprot_CTA)
+```
+
+
+```{r}
+uniprot_TMhelix.clean <- uniprot_TMhelix %>% 
+  filter(gene_name_final != "") %>% 
+  dplyr::select(Uniprot_Entry=Entry,
+                gene_name=gene_name_final,
+                Uniprot_TMhelix,
+                Uniprot_CTA,
+                Uniprot_Keywords=Keywords)  %>% 
+  group_by(gene_name) %>%
+  mutate_at(vars(Uniprot_Entry, Uniprot_Keywords, Uniprot_TMhelix),
+            ~collapseRows(., uniq = T, split = TRUE, sep="; ")) %>%
+  ungroup() %>%
+  distinct()
+
+
+head(uniprot_TMhelix.clean)
+dim(uniprot_TMhelix.clean) #19907     4
+# table(uniprot_TMhelix.clean$gene_name %in% ref_genes)
+table(duplicated(uniprot_TMhelix.clean$gene_name))
+table(uniprot_TMhelix.clean$Uniprot_CTA)
+```
+
+```{r}
+#Merge in the annotation file 
+geneID.map.uniprot <- geneID.map.clean %>% 
+  left_join(., uniprot_TMhelix.clean, by="gene_name")
+
+
+dim(geneID.map.uniprot) #59853    14
+head(geneID.map.uniprot)
+```
+
+
+# Annotate with Sialic Acid and GO Adhesion Molecules
+
+```{r}
+sialicAcid <- read.csv(file.path(PROJHOME, "0000.00.02_Reference_GeneInfo/sialicAcid_Eselectin_Genes_9.2.20.csv"))
+
+dim(sialicAcid) #664  10
+head(sialicAcid)
+# length(unique(sialicAcid$Gene.name)) #24 genes 
+```
+
+```{r}
+GO.BP <- DeGSEA::read.gmt(file.path(HOME,"0000.00.01_GSEA_geneSets_gmt/c5.bp.v7.1.symbols.gmt"))
+GO.Adhesion <- GO.BP[grepl("CELL_ADHESION", names(GO.BP))]
+
+names(GO.Adhesion)
+
+# write.csv(names(GO.Adhesion), "~/GO.terms.csv")
+```
+
+```{r}
+geneID.map.SA <- geneID.map.uniprot %>% 
+  mutate(SialicAcidPathway=case_when(gene_id %in% sialicAcid$Gene.stable.ID ~ "Yes", TRUE ~ "")) %>%
+  mutate(Cell_Adhesion_Gene=ifelse(gene_name %in% unique(unlist(GO.Adhesion)), "Yes", "")) 
+
+
+
+head(geneID.map.SA)
+dim(geneID.map.SA) #59853    16
+
+
+table(geneID.map.SA$SialicAcidPathway)
+table(geneID.map.SA$Cell_Adhesion_Gene)
+```
+
+
+# Annotate with Human Protein Atlas
+
+Pathology:
+Staining profiles for proteins in human tumor tissue based on immunohistochemisty using tissue micro arrays and log-rank P value for Kaplan-Meier analysis of correlation between mRNA expression level and patient survival. The tab-separated file includes Ensembl gene identifier ("gene_name"), gene name ("gene_name name"), tumor name ("Cancer"), the number of patients annotated for different staining levels ("High", "Medium", "Low" & "Not detected") and log-rank p values for patient survival and mRNA correlation ("prognostic - favourable", "unprognostic - favourable", "prognostic - unfavourable", "unprognostic - unfavourable"). The data is based on The Human Protein Atlas version 19.1 and Ensembl version 92.38.
+
+```{r}
+pathology <- read.delim(file.path(PROJHOME,"/0000.00.02_Reference_GeneInfo/Human_Protein_Atlas_Pathology.tsv")) %>% 
+  arrange(Gene.name) %>% 
+  select(gene_id=Gene, gene_name=Gene.name, everything())
+
+
+head(pathology)
+```
+
+```{r}
+Cancer_Expn <- pathology %>% 
+  select(Cancer,gene_name, High:Low) %>% 
+  gather(Expression_Class, N_Samples, -Cancer, -gene_name) %>% 
+  filter(Expression_Class == "High", N_Samples >= 3) %>% 
+  group_by(gene_name) %>%
+  mutate(High_Expression_in_Cancers=paste0(Cancer, collapse = "; ")) %>%
+  select(gene_name, High_Expression_in_Cancers) %>%
+  distinct()
+
+
+# dim(Cancer_Expn) #7122    2
+head(Cancer_Expn)
+# any(duplicated(Cancer_Expn$gene_name))
+```
+
+Subcellular location data:
+Subcellular location of proteins based on immunofluorescently stained cells. The tab-separated file includes the following columns: Ensembl gene identifier ("gene_name"), name of gene ("gene_name name"), gene reliability score ("Reliability"), enhanced locations ("Enhanced"), supported locations ("Supported"), Approved locations ("Approved"), uncertain locations ("Uncertain"), locations with single-cell variation in intensity ("Single-cell variation intensity"), locations with spatial single-cell variation ("Single-cell variation spatial"), locations with observed cell cycle dependency (type can be one or more of biological definition, custom data or correlation) ("Cell cycle dependency"), gene_name Ontology Cellular Component term identifier ("GO id")
+The data is based on The Human Protein Atlas version 19.1 and Ensembl version 92.38.
+
+Reliability:
+Enhanced - One or several antibodies with non-overlapping epitopes targeting the same gene have obtained enhanced validation based on orthogonal or independent antibody validation method.
+Supported - Consistency with RNA-seq and/or protein/gene characterization data, in combination with similar staining pattern if independent antibodies are available.
+Approved - Consistency with RNA-seq data in combination with inconsistency with, or lack of, protein/gene characterization data. Alternatively, consistency with protein/gene characterization data in combination with inconsistency with RNA-seq data. If independent antibodies are available, the staining pattern is partly similar or dissimilar.
+Uncertain - Inconsistency with, or lack of, RNA-seq and/or protein/gene characterization data, in combination with dissimilar staining pattern if independent antibodies are available.
+
+```{r}
+#This needs to be updated!!! HPA is not as accurate. 
+subcellular <- read.delim(file.path(PROJHOME,"/0000.00.02_Reference_GeneInfo/Human_Protein_Atlas_subcellular_location.tsv")) %>% 
+  filter( Reliability != "Uncertain") %>% 
+  dplyr::select(gene_name=Gene.name, Main.location,Additional.location,Extracellular.location)  %>% 
+  distinct() %>% 
+  filter(!duplicated(gene_name))
+
+
+dim(subcellular) #11716     4
+head(subcellular)
+# table(duplicated(subcellular$gene_name))
+```
+
+```{r}
+geneID.map.HPA <- geneID.map.SA %>% 
+  left_join(., Cancer_Expn, by="gene_name") %>% 
+  left_join(., subcellular, by=c("gene_name")) %>% 
+  rename_at(vars(High_Expression_in_Cancers, 
+                 Main.location:Extracellular.location),
+            ~paste0(.,"_HumanProteinAtlas"))
+
+
+
+head(geneID.map.HPA)
+dim(geneID.map.HPA) # 59853    20
+```
+
+
+# Annotate Small Molecule Inhibitors
+
+This package is no long working since at least Jan 2021 ...https://support.bioconductor.org/p/p133022/ 
+
+```{r eval=FALSE}
+library(rDGIdb)
+# genes <- c(geneID.map.anno$gene_name) %>% 
+#   unique() 
+
+genes <- c("TNF", "AP1", "AP2", "XYZA")
+
+#Now it doesnt find any hist for any gene names?? even thier own example genes have no hits. 
+DGI_Filter <- queryDGIdb(genes = genes,geneCategories = c("CLINICALLY ACTIONABLE")) #
+
+
+# DGI_Final <- detailedResults(DGI_Filter) %>% 
+#                   group_by(gene_name) %>% 
+#                   #collapse genes with multiple drugs into a single row
+#                   mutate_at(vars(Drug:PMIDs),
+#                             ~collapseRows(col = ., uniq = FALSE, sep="; ")) %>% 
+#                   ungroup()  %>%
+#                   dplyr::select(-SearchTerm) %>%
+#                   unique()%>% 
+#                   
+#                   mutate_all(~gsub("(;\\s;\\s){1,}|^;\\s|;\\s$","",.)) %>%
+#   select(gene_name=gene_name, Drug.gene_name.InteractionDB=Drug, Drug.gene_name.InteractionDB_PMIDs=PMIDs)
+#   
+
+
+dim(DGI_Final)# 
+# DGI_Filter@resultSummary
+```
+
+# Cancer Testes Antigen 
+
+```{r}
+CTAs <- read.csv(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/CTAs_Database_www.cta.lncc.br.csv"))
+
+head(CTAs)
+
+length(unique(CTAs$Family.member)) #276 
+```
+
+```{r}
+CTAs_withENS <- read.csv("References/CTAs_with_Ensembl_ID.csv") # a lot of duplciates because I also included all gene symbol synonyms 
+
+head(CTAs_withENS)
+table(CTAs$Family.member %in%  CTAs_withENS$Gene.name) #hmmm still missing 69 genes
+table(CTAs$Family.member %in%  CTAs_withENS$Gene.Synonym) ### only 10 in the synonyms
+```
+
+```{r}
+geneID.map.CTA <- geneID.map.HPA %>% 
+  mutate(CancerTestesAntigen_CTA=case_when(
+    gene_name %in% CTAs$Family.member | gene_id %in% CTAs_withENS$Gene.stable.ID | gene_name %in% CTAs_withENS$Gene.Synonym ~ "CTA",
+    Uniprot_CTA == "CTA" ~ "CTA",
+    TRUE  ~ ""))
+
+
+dim(geneID.map.CTA)
+table(geneID.map.CTA$CancerTestesAntigen_CTA)
+```
+
+
+# Final Clean-Up
+
+```{r}
+geneID.map.final <- geneID.map.CTA %>% 
+  select(gene_name:gene_type,Transmembrane_Helix=Predicted_Transmembrane_Structure, everything()) %>% 
+  mutate_at(vars(Transmembrane_Helix), ~case_when(
+    is.na(.) & Uniprot_TMhelix=="TMhelix" ~ Uniprot_TMhelix,
+    TRUE ~ .)) %>%
+  mutate(Cell_Surface_Protein=case_when(
+    c(grepl("plasma",Cellular.Compartment_Membrane, ignore.case = T) | grepl("Plasma", Main.location_HumanProteinAtlas)) |
+      grepl("Plasma", Additional.location_HumanProteinAtlas) ~ "Yes",
+    TRUE ~ "")) %>%
+  arrange(Cellular.Compartment_Membrane, gene_type) 
+
+head(geneID.map.final)
+dim(geneID.map.final) #59853    22
+```
+
+```{r}
+#DO NOT SAVE IT AS A CSV FILE - this file was opened by someone else and saved in excel which changed all the genes to dates (eg SEPT9 became 9-SEP)
+
+
+# write.csv(geneID.map.final, file.path(HOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_GeneLevel_IDmap_anno_3.10.21.csv"))
+# write.csv(geneID.map.final, file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_GeneLevel_IDmap_anno_3.10.21.csv"))
+```
+
+```{r}
+geneID.map.final <- read.csv(file.path(HOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_GeneLevel_IDmap_anno_3.10.21.csv"),
+                             row.names = 1)
+
+head(geneID.map.final)
+dim(geneID.map.final) #59853    23
+# View(geneID.map.final)
+
+# write.table(geneID.map.final, file.path(HOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_GeneLevel_IDmap_anno_3.10.21.txt"), 
+#             row.names = FALSE, quote = FALSE, sep = "\t")
+# 
+# write.table(geneID.map.final, file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_GeneLevel_IDmap_anno_3.10.21.txt"), 
+#             row.names = FALSE, quote = FALSE, sep = "\t")
+
+```
+
+
+# Updates
+
+## HPA Subcellular Location 
+
+```{r}
+geneID.map <- read.delim(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_GeneLevel_IDmap_anno_3.10.21.txt"), sep="\t")
+
+head(geneID.map)
+dim(geneID.map)
+```
+
+
+```{r}
+#This needs to be updated!!! HPA is not as accurate from the earlier version - eg GLIS2 is listed as plasma membrane associated
+subcellular <- read.delim(file.path(PROJHOME,"/0000.00.02_Reference_GeneInfo/Human_Protein_Atlas_subcellular_location_05.14.21.tsv")) %>% 
+  filter( Reliability != "Uncertain") %>% 
+  dplyr::select(gene_name=Gene.name, Main.location,Additional.location,Extracellular.location)  %>% 
+  distinct() %>% 
+  filter(!duplicated(gene_name)) #1 gene duplicated ATXN7
+
+
+dim(subcellular) #12086     4
+head(subcellular)
+# table(duplicated(subcellular$gene_name))
+```
+
+```{r}
+geneID.map.updated <-  read.delim(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_GeneLevel_IDmap_anno_5.14.21.txt"))
+           
+
+filter(geneID.map.updated, Cell_Surface_Protein=="" & grepl("membrane", Uniprot_Keywords, ignore.case = TRUE))
+
+
+# geneID.map.updated %>% 
+#   filter(grepl("cell mem", Uniprot_Keywords, ignore.case = T))
+
+```
+
+```{r}
+geneID.map.updated <- geneID.map %>% 
+  select(-matches("Main.location_HumanProteinAtlas|Additional.location_HumanProteinAtlas|Extracellular.location_HumanProteinAtlas")) %>% 
+  left_join(., subcellular, by=c("gene_name")) %>% 
+  rename_at(vars(Main.location:Extracellular.location),
+            ~paste0(.,"_HumanProteinAtlas")) %>% 
+  mutate(Cell_Surface_Protein=case_when(
+     grepl("plasma",Cellular.Compartment_Membrane, ignore.case = T) | grepl("Plasma", Main.location_HumanProteinAtlas) ~ "Yes",
+     grepl("Plasma", Additional.location_HumanProteinAtlas)  & ! grepl("Transcription regulation", Uniprot_Keywords) ~ "Yes",
+    TRUE ~ ""))
+
+
+
+head(geneID.map.updated)
+dim(geneID.map.updated) # 59853    23
+
+table(geneID.map.updated$Cell_Surface_Protein) #6445 cell surface 
+```
+
+```{r}
+# write.table(geneID.map.updated, file.path(HOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_GeneLevel_IDmap_anno_5.14.21.txt"),
+#             row.names = FALSE, quote = FALSE, sep = "\t")
+# 
+# write.table(geneID.map.updated, file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_GeneLevel_IDmap_anno_5.14.21.txt"),
+#             row.names = FALSE, quote = FALSE, sep = "\t")
+```
+
+```{r}
+subcell_older <- read.delim(file.path(PROJHOME,"/0000.00.02_Reference_GeneInfo/Human_Protein_Atlas_subcellular_location.tsv"))
+
+filter(subcellular, Gene.name == "GLIS2")
+filter(subcell_older, Gene.name == "GLIS2")
+```
+
+
+```{r}
+# geneID.map.updated %>% 
+#   filter(gene_name=="GLIS2")
+# 
+# geneID.map %>% 
+#   filter(gene_name=="GLIS2")
+```
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

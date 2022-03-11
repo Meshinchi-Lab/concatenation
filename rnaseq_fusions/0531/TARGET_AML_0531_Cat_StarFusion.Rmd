@@ -1,0 +1,667 @@
+---
+title: 'Concatenate STAR Fusion'
+author: "Jenny Smith"
+date: "April 5, 2019"
+output: html_document
+---
+
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.width = 10, fig.height = 10)
+knitr::opts_knit$set(root.dir = '/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2018.02.07_NCI_C.Nguyen_FusionPipeline/')
+```
+
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+library(tidyr)
+getwd()
+```
+
+```{r}
+source("~/scripts/conversion_scripts/Merge_Cat_FixDupIDs_Function.r")
+```
+
+#Define Functions to be used
+
+```{r}
+collapseRows <- function(col, uniq=FALSE){
+  #designed for dplyr so that col is the vector of the column name
+  if (uniq){col <- unique(col)}
+  
+  collapsed <- ifelse(all(is.na(col)), NA, paste(col, collapse = "; "))
+  return(collapsed)
+}
+
+
+removeDups <- function(col.rowwise){
+  
+  uniqued <- str_split(col.rowwise, "; ") %>% 
+  unlist() %>%
+  gsub(" ","",.) %>%
+  unique() %>%
+  paste(.,collapse = "; ")
+  
+  return(uniqued)
+  
+}
+
+```
+
+
+#Concatenate the Patient Level Files 
+
+```{r}
+path <- "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2018.02.07_NCI_C.Nguyen_FusionPipeline/Patient_Level_Data/"
+
+dirs <- c("chimerascan",
+          "soapfuse",
+          "star",
+          "tophat") %>% 
+  paste0(.,"_0531")
+
+
+
+#Loop to concatenate all the fusion callers. 
+for (dir in dirs){
+  path.fus <- paste0(path,dir)
+
+  files <- dir(path=path.fus, pattern="*.txt")
+  filenames=paste(path.fus, files,sep="/")
+
+  # test <- gsub("^.+/(TARGET.+[0-9].+)_RBS.+", "\\1", filenames)
+  # print(head(test))
+  regex="^.+/(TARGET.+[0-9].+)_RBS.+"
+
+  # fusionCaller <- catRbind(filenames=filenames, regex=regex, header=TRUE)
+  # print(length(unique(fusionCaller$Patient)))
+
+  filename <- paste0("TARGET_AML_0531_", dir,"_04.05.19.csv")
+  print(filename)
+  # write.csv(fusionCaller, filename, row.names=FALSE)
+
+}
+
+```
+
+
+#Read in the Clinical Data 
+
+```{r}
+merged <- read.csv("~/reference_mapping-files/TARGET_AML_0531_1031_merged_CDEs_1.10.19.csv", 
+                   stringsAsFactors = FALSE)
+
+head(merged[,1:5])
+# dim(merged) #2559   36
+```
+
+```{r}
+manifest <- read.csv("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/SequencingDataMatrix/TARGET_AML_0531_1031_miRNAseq_Ribodepletion_mRNAseq_Manifest_v4.csv")
+
+head(manifest)
+```
+
+
+#Read in the STAR Fusion Data
+
+```{r}
+star <- read.csv("Concatenated/TARGET_AML_0531_star_0531_04.05.19.csv", 
+                 stringsAsFactors = FALSE)
+
+dim(star) #67096 rows by 12
+head(star)
+```
+
+```{r}
+length(table(star$X.Fusion)) #16739 unique fusion partners 
+length(unique(star$Patient)) #457
+```
+
+Will need to track down those 4 samples FQ files and examine if Picard Tools had an error while running and might have truncated the FQ. However, all of them ran including these 4 in TopHat fusion. 
+
+```{r}
+batch2 <- manifest %>% 
+  filter(Batch == 2) %>% 
+  mutate_at(vars(Final_Patient_ID,PATIENT_ID_Original), funs(gsub("-","\\.", .))) %>% 
+  select(Final_Patient_ID:PATIENT_ID_Original,LIBRARY.mRNA) %>% 
+  unique(.) #filter(grepl("PATGIG|PATISD", PATIENT_ID_Original)) 
+
+head(batch2)
+dim(batch2)
+```
+
+
+#Reformat STAR fusion to Include Custom Columns 
+
+
+```{r}
+reformat.fusions <- function(df){
+  
+  df <- df %>% 
+    arrange(Patient) %>%
+    mutate(Breakpoints = paste(paste(gsub("chr","",Left.Chr), Left.Breakpoint, sep=":"),
+                             paste(gsub("chr","",Right.Chr), Right.Breakpoint, sep=":"), sep="|"),
+           Type = ifelse(Left.Chr == Right.Chr, "intrachromosomal","interchromosomal"),
+           size = ifelse(Type=="intrachromosomal", abs(Left.Breakpoint - Right.Breakpoint), NA)) %>%
+    mutate_all(funs(gsub("-", "\\.", .))) %>% #replace dashes with a dot. for consistency withother datasets.
+    mutate(X.Fusion = gsub("_","-",X.Fusion)) %>%
+    mutate(Fusion.Detected.STAR=ifelse(is.na(X.Fusion), "NoneDetected","Detected")) %>%
+    mutate(USI=str_split_fixed(Patient, "\\.", n=5)[,3]) %>%
+    select(Patient,USI,everything())
+  
+  return(df)
+}  
+```
+
+
+```{r}
+star.fmt <- reformat.fusions(star) %>% 
+  inner_join(., batch2, by=c("Patient"="PATIENT_ID_Original")) #add additional identifiers
+
+
+dim(star.fmt) #67096    17
+length(unique(star.fmt$Patient)) #457
+```
+
+```{r}
+head(star.fmt)
+# write.csv(star.fmt, "TARGET_AML_0531_STAR_Fusion_reformatted_4.09.2019.csv", row.names = FALSE)
+```
+
+
+
+#Filter out Fusions found in NBMs 
+
+```{r}
+filterFusions <- function(X.Fusion, Breakpoints,df2.Fusion,df2.Breakpoints){
+
+  fus <- paste(X.Fusion,Breakpoints,sep=" ")
+  # print(fus)
+  fus2 <- paste(df2.Fusion, df2.Breakpoints, sep=" ")
+  
+  if (fus %in% fus2){
+      res <- 1 #these fusions will be filtered out. 
+  }else{
+    res <- 0 #these one will not. 
+  }
+  
+  return(res)
+}
+```
+
+
+```{r}
+NBM.1031 <- read.csv("Reformatted/TARGET_AML_1031_STAR_Fusion_reformatted_7.02.2018.csv", row.names = 1) %>%
+  filter(grepl("BM[0-9]|RO[0-9]", USI)) %>% 
+  mutate_all(funs(as.character(.)))
+
+
+head(NBM.1031)
+dim(NBM.1031) #5707   17
+```
+
+```{r}
+#Using both NBM sets to account for the total fusions found in the NBM dataset
+NBM <- star.fmt %>%
+  filter(grepl("BM[0-9]|RO[0-9]", USI)) %>%
+  bind_rows(., NBM.1031)
+
+
+dim(NBM) #7464   17
+length(unique(NBM$Patient)) #84 
+```
+
+```{r}
+star.fmt.filter <- star.fmt %>% 
+  select(Patient,USI,everything()) %>%
+  
+  rowwise() %>%
+  mutate(FailedFilterFusions=filterFusions(X.Fusion, Breakpoints, NBM$X.Fusion, NBM$Breakpoints)) %>%
+  ungroup() %>%
+    
+  group_by(Patient) %>%
+  mutate(AllFail=ifelse(sum(FailedFilterFusions) == n(),"Yes","No")) %>%
+  mutate(Fusion.Detected.STAR=ifelse(AllFail == "Yes" ,"NonePassedFilter",Fusion.Detected.STAR)) %>%
+  ungroup()  %>%
+  
+  filter(AllFail == "Yes" | FailedFilterFusions == 0) %>%
+
+  rowwise() %>%
+  #change all to characters so that numeric cols can be filled below with a charcter string.
+  mutate_all(funs(as.character(.))) %>% 
+  mutate_at(vars(X.Fusion:Fusion.Detected.STAR), 
+            funs(ifelse(Fusion.Detected.STAR == "NonePassedFilter","NonePassedFilter",  .))) %>%
+  ungroup() %>%
+  
+  select(Patient,USI,everything(),-AllFail,-FailedFilterFusions,-Left.Strand,-Right.Strand) %>%
+  unique(.) #remove the duplicate entries with different senses/strands, but everyhting else is identical. 
+  
+```
+
+```{r}
+dim(star.fmt.filter) #35,094    17
+length(unique(star.fmt.filter$Patient)) #457 samples
+```
+
+```{r}
+head(star.fmt.filter)
+# write.csv(star.fmt.filter, "TARGET_AML_0531_STAR_Fusion_reformatted_FilteredForNBM_4.09.2018.csv", row.names = FALSE)
+```
+
+
+
+#Define the Primary Fusions/Breakpoints per patient 
+
+```{r}
+fusionCategory <- function(geneA,geneB){
+  fus <- c(geneA,geneB)
+  fus <- paste(fus[order(fus)], collapse = "-") #order alphabetically, so that the category includes  reciprocal fusions
+}
+```
+
+```{r}
+collapseFusions <- function(breakpoint){
+  paste(unique(breakpoint), collapse = "; ")
+}
+```
+
+```{r}
+fillNA <- function(x,USI){
+  
+  USI <- unique(USI)
+  x <- x %>% .[!is.na(.)] %>% unique()
+  
+  if(length(x) < 1){
+    x <- ""
+  }
+  
+  # print(x)
+  return(x)
+}
+```
+
+```{r}
+getPrimaryFusion <- function(USI,junction_reads,spanning_reads){
+  # breakpoint, flanking_pairs,breakpoint_pairs,spanning_reads,frame are all columns from TransAbyss
+  # brk.reads <- max(as.numeric(str_split_fixed(breakpoint_pairs,",", n=2)))
+  #We do not have information on exon or in-frame status
+
+  resolveTies <- function(df){
+        df <- df %>%
+            group_by(primary) %>%
+            #if still a tie in breakpoint pairs counts, choose the first.
+            mutate(rank=rank(junction_reads, ties.method = "first")) %>%  
+            #convert all alternate fusion calls to zero rank (eg not going to be used in tie-breaking)
+            mutate(rank=ifelse(primary=="alternate", 0, rank)) %>%
+            rowwise() %>%
+            mutate(reason=sum(reason,rank)) %>%
+            ungroup() %>% 
+            #the fusion with highest # of breakpoint reads will have largest interger rank. 
+            mutate(primary=ifelse(reason == max(reason), "primary", "alternate"))
+        
+        return(df)
+    }
+  
+  #First check that the reads are not NA values (eg. NBM samples)
+  if (all(is.na(junction_reads))){
+    res <- NA
+    return(res)
+  }
+  
+  
+  #Create boolean vectors for each type of evidence supporting the "primary" fusion. 
+  USI <- unique(USI)
+  brk.reads <-  junction_reads == max(junction_reads)
+  spanning.reads <- spanning_reads == max(spanning_reads)
+
+  #Create a temporary data frame. 
+  temp <- data.frame("brk.reads.bool"=brk.reads,
+                     "spanning.reads.bool"=spanning.reads, 
+                     stringsAsFactors = FALSE) %>%
+    #add in the subsetted per patient read counts. For visual checking on ties, etc. 
+    bind_cols(.,list("junction_reads"=junction_reads,
+                     "spanning_reads"=spanning_reads))
+  
+  #will select the one with the highest reads
+    temp <- temp %>%
+        rowwise() %>%
+        mutate(reason=sum(brk.reads.bool,spanning.reads.bool)) %>%
+        ungroup() %>%
+        mutate(primary=ifelse(reason == max(reason), "primary", "alternate"))
+
+    # break ties if there are multiple fusions with same #s of supporting reads.
+    # for those with highest evidence ("reason"), choose the one with the higher breakpoint reads
+    if (sum(temp$primary == "primary") > 1){
+        temp <- resolveTies(temp)
+        
+        # last check for ties, will break dplyr by returning a dataframe, not a vector. 
+        if (sum(temp$primary == "primary") > 1 ){
+          return(temp)
+        }
+    }
+
+  res <- temp$primary
+  
+  return(res)
+}
+```
+
+
+```{r warning=FALSE}
+star.fmt.primary <- star.fmt.filter %>% 
+  rowwise() %>%
+  #Fusion category is to encompass both reciprocal fusions under 1 name. 
+  mutate(Fusion.Category=fusionCategory(Left.Gene,Right.Gene)) %>% 
+  mutate(JunctionRead = as.numeric(ifelse(grepl("None", JunctionRead), NA,JunctionRead)),
+         SpanningRead = as.numeric(ifelse(grepl("None", SpanningRead), NA,SpanningRead)), 
+         Group=case_when(
+           grepl("BM[0-9]|RO[0-9]", Patient)~ "NBM",
+           grepl("MPN[0-9]", Patient) ~ "MPN",
+           grepl("sort",Patient, ignore.case = T) ~ "FlowSorted",
+           TRUE ~ "AML")) %>%
+  ungroup() %>%
+
+  #Define the primary fusion per patient per fusion. 
+  group_by(USI,Fusion.Category) %>%
+  mutate(Primary.Fusion=getPrimaryFusion(USI=USI, 
+                                         junction_reads = JunctionRead, 
+                                         spanning_reads = SpanningRead)) %>%
+  arrange(USI,Fusion.Category) %>%
+  
+  #Create a column for alterntate fusion breakpoints per patient per fusion. 
+  group_by(USI,Fusion.Category,Primary.Fusion) %>%
+  mutate(Alternate.Breakpoints=ifelse(Primary.Fusion=="alternate",
+                                      collapseFusions(breakpoint = Breakpoints), NA)) %>%
+  ungroup() %>%
+
+  group_by(USI,Fusion.Category) %>%
+  mutate(Alternate.Breakpoints=fillNA(Alternate.Breakpoints, USI=USI)) %>%
+  mutate(Alternate.Breakpoints=ifelse(Breakpoints==Alternate.Breakpoints,"",Alternate.Breakpoints)) %>%
+  ungroup() %>%
+  
+  #Filter out the alternate fusion rows, so alternates only provide breakpoint information. 
+  filter(grepl("primary", Primary.Fusion) | grepl("NonePassedFilter|NoneDetected", X.Fusion)) %>%
+  mutate_at(vars(Fusion.Category), funs(ifelse(grepl("NonePassedFilter-NonePassedFilter", .),
+                                                "NonePassedFilter", .))) %>%
+  select(Patient,USI,Group,Type,Fusion.Category,
+         X.Fusion,Breakpoints,Alternate.Breakpoints,
+         SpanningRead, JunctionRead, size, 
+         Left.Gene, Left.Chr, Left.Breakpoint,
+         Right.Gene,Right.Chr, Right.Breakpoint,
+         Fusion.Detected.STAR,
+         Final_Patient_ID,
+         LIBRARY.mRNA,
+         -Primary.Fusion)
+
+  
+dim(star.fmt.primary) # 31,731    20 (this reduced the file by 3,363 lines)
+# length(unique(star.fmt.primary$Patient)) #457
+```
+
+```{r}
+head(star.fmt.primary)
+# write.csv(star.fmt.primary, "TARGET_AML_0531_STAR_Fusion_reformatted_FilteredForNBM_PrimaryFusions_4.09.2019.csv", row.names=FALSE)
+```
+
+```{r}
+table(star.fmt.primary$Fusion.Category) %>%
+  data.frame() %>%
+  arrange(desc(Freq)) %>%
+  head(., n=20)
+
+
+table(star.fmt.primary$Group)
+```
+
+A little concerning that the top 20 most prevalent hits are NOT AML known fusions....
+
+
+#Split into intra and interchromosomal Fusion
+
+```{r}
+inter <- star.fmt.primary  %>%
+  filter(grepl("interchromosomal|NoneDetected|NonePassedFilter", Type)) %>%
+  select(-Fusion.Category)
+
+dim(inter) # 10973    17
+# write.csv(inter, "TARGET_AML_0531_STAR_Fusion_reformatted_InterChromosomal_FilteredForNBM_PrimaryFusions_4.09.2019.csv", row.names=FALSE)
+```
+
+
+```{r}
+intra <- star.fmt.primary %>% 
+  filter(grepl("intrachromosomal|NoneDetected|NonePassedFilter", Type)) %>%
+  select(-Fusion.Category)
+
+dim(intra) # 20780    17
+# write.csv(intra, "TARGET_AML_0531_STAR_Fusion_reformatted_IntraChromosomal_FilteredForNBM_PrimaryFusions_4.09.2016.csv", row.names=FALSE)
+```
+
+
+#Split into Intra/Inter Chromosomal Fusions and One Row per Patient. 
+
+```{r}
+table(star.fmt.primary$Type)
+```
+
+
+```{r}
+star.type <- star.fmt.primary %>%
+  group_by(Type,Patient) %>%
+  mutate(All.Fusions.Found=collapseRows(Fusion.Category,uniq = TRUE)) %>%
+  ungroup()
+  
+# head(star.type)
+```
+
+
+```{r}
+FusionGenes <- star.type %>%
+  select(USI,All.Fusions.Found,Type) %>%
+  unique(.) %>%
+  spread(Type,All.Fusions.Found) %>%
+  
+  mutate(Group=ifelse(grepl("^BM|^RO", USI), "NBM", "AML")) %>% 
+  mutate_at(vars(interchromosomal:intrachromosomal), 
+            funs(ifelse( (is.na(.) & Group != "NBM"), "NoneDetected", 
+                         ifelse( (is.na(.) & Group == "NBM"), "NonePassedFilter", .)))) %>%
+  select(-NonePassedFilter)
+ 
+# FusionGenes     
+```
+
+
+```{r}
+dim(FusionGenes) #1107    4
+# length(unique(star.type$USI))
+# write.csv(FusionGenes, "TARGET_AML_0531_STAR_Fusion_FilteredForNBM_ByType_7.02.2018.csv")
+```
+
+
+#Tally the Fusions 
+
+
+```{r}
+createMultiCols <- function(col,split=FALSE,suffix){
+  #col is the column with many factors (eg all fusions). character vector lenght 1.
+  #suffix is a character string for the suffix on all column names
+  #desinged for dplyr bind_cols() function
+  
+  #example
+  # df <- df %>%
+  #   bind_cols(.,createMultiCols(.$Fusion, suffix=".sensefusion")) 
+  
+  if(split){
+    groups <- unique(gsub(" ","",unlist(str_split(col, "; "))))
+    groups <- groups[groups != ""]
+  }else{
+    groups <- unique(col)
+  }
+  list <- lapply(groups, function(x) ifelse(grepl(paste0(x, ";"), col) | grepl(paste0(x, "$"), col) , "Yes",
+                                            ifelse(grepl("^$|Unknown",col) | is.na(col), "Unknown","No"))) 
+  list.names <- gsub("-", "_",  groups)
+  names(list) <- paste0(list.names,suffix)
+  
+  return(list)
+}
+```
+
+
+
+```{r}
+createCols_byType <- function(df,col){
+  
+  # print(head(unlist(df[,col])))
+  
+  cols <- createMultiCols(col=unlist(df[,col]),split = TRUE,suffix = c(""))  %>%
+    bind_cols() %>%
+    mutate(USI=unlist(df[,"USI"])) %>%
+    select(USI, everything(), -NonePassedFilter, -NoneDetected)
+  
+  return(cols)
+}
+```
+
+
+```{r}
+createFreqTable <- function(createMultiCols.df,type){
+  
+  df <- t(sapply(createMultiCols.df[,-1], table)) %>%
+          as.data.frame() %>% 
+          rownames_to_column("Fusion_Category") %>%
+          mutate(Percent=(Yes/(Yes+No))*100) %>%
+          arrange(desc(Percent))
+
+  if (type == "Exon"){
+    df <- df %>%
+            separate(Fusion,c("X5.Gene", "X3.Gene"), sep="exon[0-9]{1,2}", remove = FALSE) %>%
+            mutate(X5.Exon=gsub("^.+(exon[0-9]{1,2})_.+", "\\1", Fusion),
+                 X3.Exon=gsub("^.+_.+(exon[0-9]{1,2})", "\\1", Fusion),
+                 X3.Gene=gsub("_", "", X3.Gene)) %>%
+            select(Fusion,contains("Gene"),contains("Exon"),everything())
+
+  }else if(type == "Gene"){
+    df <- df %>%
+            separate(Fusion_Category,c("GeneA", "GeneB"), sep="\\_", remove = FALSE) %>%
+            select(Fusion_Category,contains("Gene"),everything())
+  }
+  
+  return(df)
+}
+```
+
+
+```{r}
+inter.Genes <- createCols_byType(df=FusionGenes, col="interchromosomal") 
+dim(inter.Genes) #1112 by 17,126
+```
+
+
+```{r warning=FALSE}
+Inter.G.Tab <- createFreqTable(inter.Genes, type="Gene")
+head(Inter.G.Tab)
+# write.csv(Inter.G.Tab, "TARGET_AML_0531_STAR_Fusion_reformatted_InterChromosomal_FilteredForNBM_GeneLevel_Tables_07.02.2018.csv", row.names = FALSE)
+```
+
+
+```{r}
+intra.Genes <- createCols_byType(df=FusionGenes, col="intrachromosomal")
+
+dim(intra.Genes) #1112 by 10,837
+```
+
+
+```{r warning=FALSE}
+Intra.G.Tab <- createFreqTable(intra.Genes, type="Gene")
+head(Intra.G.Tab)
+
+# write.csv(Intra.G.Tab, "TARGET_AML_0531_STAR_Fusion_reformatted_IntraChromosomal_FilteredForNBM_GeneLevel_Tables.csv", row.names = FALSE)
+```
+
+
+
+#Reformat Star for AGFusion 
+
+Will need the in-frame information and exon information. 
+
+```{r}
+star.fmt.primary <- read.csv("Reformatted/TARGET_AML_0531_STAR_Fusion_reformatted_FilteredForNBM_PrimaryFusions_7.02.2018.csv", row.names = 1)
+dim(star.fmt.primary)
+head(star.fmt.primary[,1:5])
+```
+
+STAR fusion format does not work because the AGFusion expects to have an ENSG identifier, which I do not have. Though these may be 
+
+```{r}
+# ForAnno <- star %>%
+#   # slice(1:1000) %>%
+#   select(FusionName=X.Fusion, JunctionReadCount=JunctionRead, SpanningFragCount=SpanningRead,
+#          LeftGene=Left.Gene, Left.Chr, Left.Breakpoint, Left.Strand,
+#          RightGene=Right.Gene, Right.Chr, Right.Breakpoint, Right.Strand) %>%
+#   mutate(SpliceType=rep("None", nrow(.)), 
+#          FusionName=gsub("_","--",FusionName), 
+#          LargeAnchorSupport=rep("None",nrow(.))) %>%
+#   unite(LeftBreakpoint, Left.Chr:Left.Strand, sep=":") %>%
+#   unite(RightBreakpoint, Right.Chr:Right.Strand, sep=":") %>%
+#   select(FusionName,JunctionReadCount, SpanningFragCount, SpliceType, LeftGene, LeftBreakpoint,
+#          RightGene, RightBreakpoint,LargeAnchorSupport)
+# 
+# ForAnno  
+```
+
+
+So I reformatted the data to be like the Tophat input. 
+Cu sent over the GTF file, and the STAR fusion used Ensembl V74 annotations. 
+
+```{r}
+ForAnno <- star %>% 
+  # slice(1:100) %>%
+ select(Patient, Left.Gene, Left.Chr, Left.Breakpoint, 
+         Right.Gene, Right.Chr, Right.Breakpoint, 
+        JunctionRead, SpanningRead) %>% 
+  mutate(Col10=rep(0,nrow(.)), 
+         Col11=rep(0,nrow(.))) 
+  #remove the version #s from the ACXXXX genes. 
+  # mutate_at(vars(contains("Gene")), funs(ifelse(grepl("^AC[0-9]+", .), gsub("\\.[0-9]", "",.), .))) 
+  # filter(grepl("SNX29P2", Left.Gene) | grepl("SNX29P2", Right.Gene))
+```
+
+```{r}
+# write.table(ForAnno, "TARGET_AML_0531_Starfusion_inTopHapFmt_ForAGFusion.txt", 
+#             row.names = FALSE, sep = "\t", quote = FALSE, col.names =FALSE)
+```
+
+
+
+
+
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

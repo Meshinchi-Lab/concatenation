@@ -1,0 +1,270 @@
+---
+title: "Concatenate 1031 Exon Coverage"
+output: html_document
+---
+
+#Set-up
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 8, fig.width = 10)
+knitr::opts_knit$set(root.dir = '/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2017.10.09_Concatenate_1031_RNAseq/')
+```
+
+```{r message=FALSE}
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(stringr)
+library(reshape2)
+library(readr)
+getwd()
+```
+
+```{r}
+source("~/scripts/conversion_scripts/Merge_Cat_FixDupIDs_Function.r")
+```
+
+```{r}
+addCols <- function(df,symbol,exon){
+  library(dplyr)
+  
+  df <- as.data.frame(df)
+  
+  df <- df %>%
+    mutate(geneSymbol=symbol,
+           exon=exon) %>%
+    select(geneSymbol, exon, everything())
+  
+  return(df)
+}
+```
+
+
+```{r}
+#Function for the TPM conversion. 
+# Based on https://groups.google.com/forum/#!topic/rsem-users/W9RQrZIOzA4
+RPKM_to_TPM <- function(RPKM){
+  conversionFactor <- sum(RPKM) / 1E6
+  TPM <- RPKM / conversionFactor
+  return(TPM)
+}
+```
+
+
+#Identify Files to Be Concatenated
+
+```{r}
+filepath <-  "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level3/exon/2017July_BCCA_0531_1031_Ribodepletion_Illumina_data/"
+
+allfiles <- dir(path = filepath,
+                pattern = ".normalized")
+
+head(allfiles)
+```
+
+
+```{r}
+length(allfiles) #1,116 files (no stella)
+```
+
+```{r}
+#target matrix will have NBM, AML, and untreated cell line samples ("D1" == day 1)
+target <- paste0(filepath, grep("^[RBPS][A-Z0-9\\-]", allfiles, value=TRUE)) #1,111 samples
+
+#cell line matrix will have Kasumis and MV411s treated and untreated.  
+cells <- paste0(filepath, grep("^Kas|MV4", allfiles, value=TRUE))  #6 samples
+```
+
+```{r}
+head(target, n=2)
+head(cells, n=2)
+```
+
+
+
+
+#Columns Description
+
+The .exon.normalized file contains: For BCCA
+-*column 1*: gene id
+-column 2: transcript id or "merged_<gene_id>" if the analysis was performed in
+collapse mode
+-colomn 3: strand of the annotation ("+" or "-")
+-*column 4*: exon number (relative to the gene's strand)
+-column 5: "exon" (annotation type)
+-column 6: chromosome
+-column 7: start of the exon (relative to the positive strand, so start<end)
+-column 8: end of the exon (relative to the positive strand, so start<end)
+-*column 9*: number of fractional reads inside this exon's boundaries (sum of the
+fraction of each read inside this region)
+-column 10: total coverage across this exon (sum of the coverage depth at each
+base in this exon)
+-column 11: average coverage inside this exon-- total coverage across this exon
+divided by the exon's length
+-*column 12*: normalized average coverage inside this exon (RPKM) -- (number of this
+exon's fractional reads x 1000000000) / (NORM_TOTAL x exon length)
+
+
+#Begin Concatenation 
+
+
+```{r}
+#Pattern to select the Target Barcode
+pattern <- "^.+\\/([BPR][A-Z0-9].+R)\\_.+"
+pattern.cells <- ".+\\/([KM][A-Za-z0-9].+R)\\_.+"
+```
+
+```{r}
+#Select the column indices 
+selected <- c(1,4,9,12)
+```
+
+```{r results='hide'}
+filesWithPath <- list(target[1:10], cells)
+patterns <- list(pattern, pattern.cells)
+
+cated <- mapply(catExpnData,filesWithPath, patterns, MoreArgs = list(cols=selected,header=FALSE), SIMPLIFY = FALSE)
+
+names(cated) <- c("TARGET", "Cells")
+```
+
+```{r}
+sapply(cated, function(x) sapply(x,dim)) %>% set_rownames(rep(c("genes", "samples"), 4))
+```
+
+```{r}
+gc()
+# save(cated, file="TARGET_AML_1031_ExonLevel_RNAseq_Cated.RData")
+load("TARGET_AML_1031_ExonLevel_RNAseq_Cated.RData")
+```
+
+
+#Convert RPKM to TPM 
+
+```{r}
+options(scipen = 999)
+
+for (i in 1:2){
+  names(cated[[i]]) <- c("geneSymbol", "Exon", "FractionalCounts", "RPKM")
+  head(cated[[i]]$RPKM)
+  cated[[i]][["TPM"]] <- apply(cated[[i]]$RPKM,2, RPKM_to_TPM)
+}
+
+```
+
+```{r}
+IDmap <- read.csv("GeneSymbol_EnsemblID_Conversion.csv")
+head(IDmap)
+```
+
+
+#Check that the Gene Ids are in the Same Order
+
+```{r}
+# apply(cated$TARGET$`1`, MARGIN=2,FUN=identical, y=cated$TARGET$`1`[,1])
+sapply(cated$TARGET, function(mat) all(apply(mat, MARGIN=2,FUN=identical, y=mat[,1])))
+
+```
+Note: Columns are the counts, so would not expect or want these to be identical for all samples (columns)
+
+```{r}
+sapply(cated$Cells, function(mat) all(apply(mat, MARGIN=2,FUN=identical, y=mat[,1])))
+```
+
+
+
+#Add columns for the Gene Symbol and Ensembl Symbol 
+
+"FractionalCounts", "RPKM"
+```{r}
+withCols <- lapply(cated$TARGET[3:5], addCols, 
+                   symbol = cated$TARGET$geneSymbol[,1], exon = cated$TARGET$Exon[,1])
+
+
+lapply(withCols, function(x) head(x[,1:5]))
+```
+
+```{r}
+withCols.cells <- lapply(cated$Cells[3:5], 
+                         addCols, symbol = cated$Cells$geneSymbol[,1], exon = cated$TARGET$Exon[,1])
+
+lapply(withCols.cells, function(x) head(x[,1:5]))
+```
+
+
+#Save the output
+
+```{r}
+list <- list(withCols, withCols.cells)
+names(list) <- c("TARGET", "Cells")
+
+for (i in 1:2){
+  n <- ifelse(names(list[i]) == "TARGET", "TARGET_AML_AAML1031_RNASeq_Exon_", "Kasumi_MV4-11_Exon_")
+  
+  for (idx in names(list[[i]])){
+    filename <- paste0(n, idx,".csv")
+    print(filename)
+    write.csv(list[[i]][[idx]], filename, row.names = FALSE)
+  }
+}
+
+```
+
+
+
+#Create Subset of CBL expression 
+
+```{r}
+TPMs  <- read_csv("exonLevel/BCCA_inHouse_Pipeline/TARGET_AML_AAML1031_RNASeq_Exon_TPM.csv")
+
+dim(TPMs) #332,261   1113
+head(TPMs[,1:5])
+```
+
+CBL:	ENSG00000110395
+
+```{r}
+CBL <- TPMs %>% 
+  select(gene_id=geneSymbol, everything()) %>%
+  filter(gene_id=="ENSG00000110395") %>% 
+  gather(USI,TPMs, -gene_id, -exon) %>%
+  mutate(gene_name="CBL",
+         transcript_id="ENST00000264033") %>%
+  mutate(Group=case_when(grepl("^BM|^RO", USI) ~ "NBM",
+                         grepl("^P", USI) ~ "AML",
+                         grepl("Kas|MV4", USI) ~ "Celllines"))
+
+
+head(CBL)
+dim(CBL)
+```
+
+```{r}
+write.csv(CBL,"exonLevel/BCCA_inHouse_Pipeline/TARGET_AML_AAML1031_CBL_Exon_TPMs.csv", row.names = FALSE)
+```
+
+```{r}
+table(CBL$Group)
+table(CBL$exon)
+```
+
+
+
+
+
+
+
+NOTE:
+
+If markdown cannot be completed with pandoc (memory issues), use the following
+
+> library("rmarkdown")
+> render("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/TARGET_AML_1031_Cat_RNAseq.Rmd", "html_document")
+
+
+#Session Info
+
+```{r}
+sessionInfo()
+```

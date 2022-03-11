@@ -1,0 +1,448 @@
+---
+title: "Concatenate RNA-seq"
+author: "Jenny Smith"
+date: "June 6, 2019"
+output: html_document
+---
+  
+
+#Set-up
+  
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 5, fig.width = 5)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,'/2019.06.06_Concatenate_Relapse_RNAseq/'))
+options(stringsAsFactors = FALSE)
+```
+
+```{r message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(reshape2)
+library(tidyr)
+library(tibble)
+library(magrittr)
+library(purrr)
+library(readr)
+```
+
+```{r}
+source(file.path(SCRIPTS,"conversion_scripts/Merge_Cat_FixDupIDs_Function.r"))
+source(file.path(SCRIPTS,"RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/R/rmDupGenes_Function.r"))
+```
+
+
+#Define Functions to be used. 
+
+```{r}
+#Function for the TPM conversion. 
+# Based on https://groups.google.com/forum/#!topic/rsem-users/W9RQrZIOzA4
+#Useage: sapply(cated$RPKM, RPKM_to_TPM)
+
+RPKM_to_TPM <- function(RPKM){
+  conversionFactor <- sum(RPKM) / 1E6
+  TPM <- RPKM / conversionFactor
+  return(TPM)
+}
+```
+
+
+```{r}
+#https://stackoverflow.com/questions/32040742/dplyrselect-including-all-other-columns-at-end-of-new-data-frame-or-beginni
+
+addCols <- function(df,symbol,feature_number=NULL){
+  library(dplyr)
+  
+  df <- df %>%
+    as.data.frame() %>%
+    mutate(geneSymbol=symbol) %>%
+    select(geneSymbol, everything()) 
+  
+  if(!is.null(feature_number)){
+    df <- df %>% 
+      add_column(feature_number=feature_number,.after = "geneSymbol")
+  }
+  
+  return(df)
+}
+```
+
+
+
+#Read in the Manifests and ID maps
+
+```{r}
+ID.map1 <- read.csv("target_barcode_mapping_4.8.19.csv") %>% 
+  mutate(Batch="1") %>% 
+  set_rownames(.$Barcode)
+
+dim(ID.map1)
+head(ID.map1)
+```
+
+```{r}
+ID.map2 <- read.csv("target_barcode_mapping_5.31.19.csv") %>% 
+  mutate(Batch="2") %>% 
+  set_rownames(.$Barcode)
+
+dim(ID.map2)
+head(ID.map2)
+```
+
+```{r}
+ID.map3 <- read.csv("target_barcode_mapping_6.14.19.csv") %>% 
+  mutate(Batch="3") %>% 
+  set_rownames(.$Barcode)
+
+dim(ID.map3)
+head(ID.map3)
+```
+
+```{r}
+ID.map4 <- read.csv("target_barcode_mapping_9.17.19.csv") %>%
+    select(GSC.library=Library, Barcode=External.identifier, everything()) %>%
+    mutate(Batch="4") %>% 
+    set_rownames(.$Barcode)
+
+dim(ID.map4)
+head(ID.map4)
+```
+
+
+```{r}
+manifest <- read.csv("GSC_1669_complete_manifest.csv", fileEncoding="latin1") %>% 
+  left_join(., ID.map1, by=c("Sample.ID"="Barcode")) %>% 
+  left_join(.,ID.map2, by=c("Sample.ID"="Barcode")) %>% 
+  left_join(.,ID.map3, by=c("Sample.ID"="Barcode")) %>%
+  left_join(.,ID.map4, by=c("Sample.ID"="Barcode")) %>%
+  mutate_at(vars(matches("GSC.library|Batch")), ~ifelse(is.na(.), "", .)) %>% 
+  unite(GSC.library,contains("GSC.library"), sep = "") %>%
+  unite(Batch,contains("Batch"), sep = "") %>% 
+  mutate(USI=str_split_fixed(Anonymous.Patient.ID, "-", n=3)[,3])
+
+dim(manifest) #551  33
+head(manifest)
+```
+
+```{r}
+sum(manifest$GSC.library=="")
+table(manifest$Batch, useNA = 'always')
+# write.csv(manifest, "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/SequencingDataMatrix/TARGET_AML_RBD_Relapse_Manifest_v3.csv")
+```
+
+
+
+#Identify Files to Be Concatenated
+
+We have intron and exon level counts. However, I would want only the concatenated level files to be on the fast drive now. All patient level can be archived directly. 
+
+```{r}
+filepath <-  file.path(SCRATCH,"2019.04_BCCA_mRNAseq_Relapse_Data_Downloads")
+
+gene <- dir(path = filepath, 
+                pattern = "transcript.normalized$",
+                recursive = TRUE,
+                full.names = TRUE)
+
+head(gene)
+length(gene) #543
+```
+
+```{r}
+intron <- dir(path = filepath, pattern = "intron.ratios.normalized$",
+                recursive = TRUE,full.names = TRUE)
+
+head(intron)
+length(intron)  #543
+```
+
+```{r}
+exon <- dir(path = filepath, pattern = "exon.normalized$",
+                recursive = TRUE,full.names = TRUE)
+
+head(exon)
+length(exon) #543
+```
+
+
+
+#Columns Description
+
+the .transcript.normalized file contains:
+-*column 1: gene id*
+-column 2: transcript id or "merged_<gene_id>" if the analysis was performed in
+collapse mode
+-colomn 3: chromosome
+-column 4: start of the transcript (relative to the positive strand, so
+start<end)
+-column 5: end of the transcript (relative to the positive strand, so start<end)
+-column 6: strand of the annotation ("+" or "-")
+-column 7: sum of the length of all exons in this transcript or collapsed gene
+-column 8: sum of the length of all introns in this transcript or collapsed gene
+-*column 9*: number of fractional reads inside this merged_gene or transcript's
+exons (sum of the fraction of each read inside all exons)
+-column 10: total coverage across all the exons in this merged_gene or transcript
+(sum of the coverage depth at each base in all exons)
+-column 11: number of fractional reads inside this merged_gene or transcript's
+introns (sum of the fraction of each read inside all introns)
+-column 12: total coverage across all the introns in this merged_gene or
+transcript (sum of the coverage depth at each base in all introns)
+-column 13: average coverage over all exons -- sum of the coverage depth at each
+base in all exons divided by the sum of the exon lengths)
+-column 14: average coverage over all introns and exons -- sum of the coverage
+depth at each base between the merged_gene or transcript's start and end
+divided by the number of bases between the gene's start and end
+-*column 15*: normalized coverage (RPKM) -- (number of fractional reads in all exons
+in this merged gene or transcript x 1000000000)/(NORM_TOTAL x sum of the
+length of all exons in this merged gene or transcript)
+-*column 16*: gene symbol (or gene id if symbol is unavailable)
+-column 17: biotype (or "-" if biotype unavailable)
+-column 18: gene description (or "-" if description is unavailable)
+
+
+_The .exon.normalized file contains: For BCCA_
+-*column 1*: gene id
+-column 2: transcript id or "merged_<gene_id>" if the analysis was performed in
+collapse mode
+-colomn 3: strand of the annotation ("+" or "-")
+-*column 4*: exon number (relative to the gene's strand)
+-column 5: "exon" (annotation type)
+-column 6: chromosome
+-column 7: start of the exon (relative to the positive strand, so start<end)
+-column 8: end of the exon (relative to the positive strand, so start<end)
+-*column 9*: number of fractional reads inside this exon's boundaries (sum of the
+fraction of each read inside this region)
+-column 10: total coverage across this exon (sum of the coverage depth at each
+base in this exon)
+-column 11: average coverage inside this exon-- total coverage across this exon
+divided by the exon's length
+-*column 12*: normalized average coverage inside this exon (RPKM) -- (number of this
+exon's fractional reads x 1000000000) / (NORM_TOTAL x exon length)
+
+
+_The .intron.ratios.normalized file contains:_
+-*column 1*: gene id
+-column 2: transcript id or "merged_<gene_id>" if the analysis was performed in
+collapse mode
+-colomn 3: strand of the annotation ("+" or "-")
+-*column 4*: intron number (relative to the gene's strand)
+-column 5: "intron" (annotation type)
+-column 6: chromosome
+-column 7: start of the intron (relative to the positive strand, so start<end)
+-column 8: end of the intron (relative to the positive strand, so start<end)
+-*column 9*: number of fractional reads inside this intron's boundaries (sum of the
+fraction of each read inside this region)
+-column 10: total coverage across this intron (sum of the coverage depth at each
+base in this intron)
+-column 11: collapsed gene or transcript length
+-column 12: average coverage of the collapsed gene or transcript
+-column 13: intron length
+-column 14: average coverage inside this intron-- total coverage across this
+intron divided by the intron's length
+-column 15: intron-to-gene coverage ratio: average intron coverage divided by the
+average collapsed gene or transcript coverage
+-column 16: duplicate of column 14
+-*column 17*: normalized average coverage inside this intron (RPKM) -- (number of
+this intron's fractional reads x 1000000000) / (NORM_TOTAL x intron length)
+
+
+#Begin Concatenation 
+
+```{r}
+results <- list("gene"=gene,"exon"=exon,"intron"=intron)
+```
+
+```{r}
+#Pattern to select the Target Barcode/GSC barcode
+pattern <- "^.+\\/(B[0-9]{5})_.+"
+```
+
+```{r}
+#Select the column indices 
+selected <- list("gene"=c(1,9,15,16),
+                 "exon"=c(1,4,9,12),
+                 "intron"=c(1,4,9,17)) 
+```
+
+```{r}
+cated <- map2(results, selected, catExpnData, regex=pattern)
+names(cated) <- names(results)
+
+names(cated$gene) <- c("gene_id","counts","RPKM","geneSymbol")
+names(cated$exon) <- c("gene_id","exon_number","counts","RPKM")
+names(cated$intron) <- c("gene_id","intron_number","counts","RPKM")
+```
+
+```{r}
+summary(cated)
+```
+
+
+#Add in TPMs 
+
+```{r}
+cated$gene[["TPM"]] <- apply(cated$gene$RPKM,2, RPKM_to_TPM)
+
+table(apply(cated$gene[["TPM"]], 2, sum)) #all sum to 1 million 
+```
+
+```{r}
+cated$exon[["TPM"]] <- apply(cated$exon$RPKM,2, RPKM_to_TPM)
+
+table(apply(cated$exon[["TPM"]], 2, sum)) #all sum to 1 million 
+```
+
+
+```{r}
+cated$intron[["TPM"]] <- apply(cated$intron$RPKM,2, RPKM_to_TPM)
+
+table(apply(cated$intron[["TPM"]], 2, sum)) #all sum to 1 million 
+```
+
+```{r}
+map(cated, ~map(., ~head(.[,1:5])))
+```
+
+```{r}
+map(cated, ~map(., dim))
+```
+
+
+#Check that the Gene Ids are in the Same Order
+
+```{r}
+table(apply(cated$gene$geneSymbol,2,
+            function(x) identical(x=x, y=cated$gene$geneSymbol[,1])))
+```
+
+```{r}
+table(apply(cated$exon$gene_id,2, 
+            function(x) identical(x=x, y=cated$exon$gene_id[,1])))
+```
+
+```{r}
+table(apply(cated$intron$gene_id,2, 
+            function(x) identical(x=x, y=cated$intron$gene_id[,1])))
+```
+
+
+#Add columns for the Gene Symbol and Ensembl Symbol 
+
+```{r}
+#Rename based on the provided Manifest 
+cols <- data.frame(GSC.library=colnames(cated$gene$counts)) %>% 
+  left_join(., select(manifest, Sample.ID, GSC.library), 
+            by="GSC.library") #ensure correct order 
+
+head(cols)
+dim(cols)
+```
+
+```{r}
+gene.final <- lapply(cated$gene[c(2,3,5)], 
+                     function(x) addCols(df=x, symbol = cated$gene$geneSymbol[,1]) %>% 
+                       set_colnames(., value = c("geneSymbol", gsub("-",".",cols$Sample.ID))))
+
+
+lapply(gene.final,function(x) head(x[,1:5]))
+# map(gene.final, ~sum(is.na(colnames(.)))) #no NAs
+# map(gene.final, ~sum(duplicated(colnames(.)))) #no dups
+```
+
+```{r}
+exon.final <- lapply(cated$exon[c(3:5)], function(x) addCols(df=x, symbol = cated$exon$gene_id[,1], 
+                                                             feature_number = cated$exon$exon_number[,1]) %>% 
+                       set_colnames(., value = c("gene_id", "exon_number", gsub("-",".",cols$Sample.ID))))
+
+lapply(exon.final,function(x) head(x[,1:5]))
+```
+
+```{r}
+intron.final <- lapply(cated$intron[c(3:5)], function(x) addCols(df=x, symbol = cated$intron$gene_id[,1], 
+                                                          feature_number = cated$intron$intron_number[,1]) %>% 
+                         set_colnames(., value = c("gene_id","intron_number", gsub("-",".",cols$Sample.ID))))
+
+
+lapply(intron.final,function(x) head(x[,1:5]))
+```
+
+#Save the output
+
+```{r}
+for (final in ls(pattern="final")){
+  for (df in names(get(final))){
+      if(df == "counts"){
+        n <- "FractionalCounts"
+      }else{
+        n <- df
+      }
+    
+      type <- gsub(".final","Level",final)
+      filename <- paste("TARGET_0531_1031_Relapse_Ribodepleted_RNAseq",type,n,sep="_") %>% 
+        paste0(.,".csv")
+      
+      print(filename)
+      write.csv(get(final)[[df]], file = filename, row.names = FALSE)
+  }
+}
+
+```
+
+
+#Remove Duplicate Genes 
+
+```{r}
+cts <- read_csv("ExpnData/geneLevel/TARGET_0531_1031_Relapse_Ribodepleted_RNAseq_geneLevel_FractionalCounts.csv")
+cts <- as.data.frame(cts)
+
+dim(cts)
+head(cts[,1:5])
+```
+
+```{r}
+TPM <- read_csv("ExpnData/geneLevel/TARGET_0531_1031_Relapse_Ribodepleted_RNAseq_geneLevel_TPM.csv")
+TPM <- as.data.frame(TPM)
+
+dim(TPM)
+head(TPM[,1:5])
+```
+
+
+```{r}
+rmDup_cts <- rmDupGenes(expnData = cts, 
+                        geneCol = "geneSymbol")
+
+dim(rmDup_cts$remDups) #51573   543
+head(rmDup_cts$remDups[,1:5])
+
+
+write.csv(rmDup_cts$remDups,"ExpnData/geneLevel/TARGET_0531_1031_Relapse_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_FractionalCounts.csv")
+```
+
+```{r}
+rmDup_TPM <- rmDupGenes(expnData = TPM, 
+                        geneCol="geneSymbol")
+
+dim(rmDup_TPM$remDups) #51573   543
+head(rmDup_TPM$remDups[,1:5])
+
+# write.csv(rmDup_TPM$remDups, "ExpnData/geneLevel/TARGET_0531_1031_Relapse_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_TPM.csv")
+```
+
+
+
+NOTE:
+  
+  If markdown cannot be completed with pandoc (memory issues), use the following
+
+> library("rmarkdown")
+> render("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/TARGET_AML_1031_Cat_RNAseq.Rmd", "html_document")
+
+
+#Session Info
+
+```{r}
+sessionInfo()
+```
+

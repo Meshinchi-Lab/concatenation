@@ -1,0 +1,51 @@
+---
+title: "GDC_Clinical_Data_Download.Rmd"
+author: "Jenny Smith"
+date: "11/1/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(GenomicDataCommons)
+```
+
+
+# Clinical Data Elements from Study Authors 
+
+```{r}
+qClin <- files() %>%
+    filter(~ type == 'clinical_supplement' &
+             cases.project.project_id == "TARGET-AML") 
+
+# str(qClin)
+# qClin %>% count()
+```
+
+```{r message=FALSE}
+manifest.clin <- manifest(qClin)
+head(manifest.clin)
+
+write.csv(manifest.clin, "TARGET_AML_Clinical_Data_on_GDC_Manifest.csv", row.names = FALSE)
+```
+
+```{r}
+#Add the GDC Client to your R options
+options(gdc_client=file.path(dirname(HOME), "scripts/opt/bin/gdc-client"))
+gdc_client()
+```
+
+```{r}
+#Set your destination directory
+gdc_set_cache(directory = file.path(SCRATCH, "jlsmith3"))
+gdc_cache()
+```
+
+```{r}
+#Download the data sets
+clinFile <- gdcdata(uuids = manifest.clin$id)
+clinFile
+```

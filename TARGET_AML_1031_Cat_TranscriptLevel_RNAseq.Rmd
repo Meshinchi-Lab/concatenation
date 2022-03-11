@@ -1,0 +1,688 @@
+---
+title: "Concatenate Transcript Level RNA-seq"
+author: "Jenny Smith"
+date: "October 9, 2017"
+output: html_document
+---
+
+
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 8, fig.width = 10)
+knitr::opts_knit$set(root.dir = '/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2017.10.09_Concatenate_1031_RNAseq/')
+```
+
+
+```{r message=FALSE}
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(stringr)
+library(reshape2)
+library(tidyr)
+library(tibble)
+getwd()
+```
+
+
+```{r}
+source("~/scripts/conversion_scripts/Merge_Cat_FixDupIDs_Function.r")
+```
+
+
+
+#Define Functions to be used. 
+
+```{r}
+#Function for the TPM conversion. 
+# Based on https://groups.google.com/forum/#!topic/rsem-users/W9RQrZIOzA4
+#Useage: sapply(cated$RPKM, RPKM_to_TPM) #apply per column. 
+
+RPKM_to_TPM <- function(RPKM){
+  conversionFactor <- sum(RPKM) / 1E6
+  TPM <- RPKM / conversionFactor
+  return(TPM)
+}
+```
+
+
+```{r}
+addCols <- function(df,symbol,id){
+  library(dplyr)
+  
+  df <- df %>%
+    mutate(geneSymbol=symbol,
+           gene_id=id) %>%
+    select(geneSymbol, gene_id, everything())
+  
+  return(df)
+}
+```
+
+```{r}
+collapseDuplicates <- function(df,ID.column,duplicate){
+  #df is the datframe with multiple patient entries to collapse
+  #ID column is the column to match the USI 
+  #duplicate is the USI of the dups. 
+  
+  idx <- which(df[, ID.column] == duplicate)
+  cde <- df[idx,]
+  
+  if (length(unique(cde)) == 1){
+    cde <- unique(cde)
+  }else{
+    #Examine eac column seperately
+    for (i in 1:ncol(cde)){
+        #if all identical, just unique it
+        if (length(unique(cde[,i])) == 1){
+          cde[1,i] <- unique(cde[,i])
+        }else{
+          #otherwise, collap
+          cde[1,i] <- paste(unique(cde[,i]), collapse = ";")
+      }
+    }
+  }  
+
+  #update the clinical annotations with only the merged cde.
+  cde <- cde[1,]
+
+  
+  return(cde)
+}
+```
+
+
+#Columns Description
+
+## From Kallisto
+target_id	
+length	
+eff_length	
+est_counts	
+tpm
+
+##From BCCA Isoform.quantification (Sailfish)
+
+transcript
+raw_counts
+median_length_normalized
+RPKM
+
+
+
+
+#High Depth 1031
+
+```{r}
+filepath.1031 <-  "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level3/transcript/2017July_BCCA_1031_Kallisto_Illumina_data/"
+
+allfiles <- paste(filepath.1031,dir(path = filepath.1031, pattern = "^.+GRCh37.87.+.tsv$"),sep="")
+
+
+head(allfiles)
+length(allfiles)
+```
+
+
+#High Depth 1031
+
+```{r}
+#target matrix will have NBM, AML, and untreated cell line samples ("D1" == day 1)
+target <- grep("Sorted|Kas|MV4", ignore.case=TRUE, allfiles,invert = TRUE, value=TRUE) #1,112 samples (missing stella)
+
+#Sorted primary samples
+sorted <- grep("Sorted", allfiles, ignore.case = TRUE, value=TRUE)
+
+#cell line matrix will have Kasumis and MV411s treated and untreated.  
+cells <- grep("Kas|MV4", allfiles, value=TRUE)  #6 samples
+```
+
+
+```{r}
+#checking on Bulk. They are not in TARGET. Instead have "Unsorted" in thier identifier. 
+str_split_fixed(sorted, "-", n=5)[,3] %>%
+  unique(.) %>%
+  paste0("^.+", ., ".+") %>%
+  paste(., collapse = "|") %>%
+  grep(., target)
+```
+
+
+
+#Low Depth 0531
+
+
+```{r}
+filepath.LD.0531 <-  "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level3/transcript/2016Apr_BCCA_0531_Kallisto_Illumina_data/"
+
+files.LD.0531 <- paste(filepath.LD.0531, dir(path = filepath.LD.0531, pattern = ".tsv$"), sep="") 
+
+# head(files.LD.0531)
+# length(files.LD.0531)
+```
+
+
+
+#High Depth 0531
+
+```{r}
+filepath.HD.0531 <-  "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level3/transcript/2014Aug_BCCA_0531_Sailfish_Illumina_data/"
+
+files.HD.0531 <- paste(filepath.HD.0531, dir(path = filepath.HD.0531, pattern = ".quantification.txt"), sep="")
+
+# head(filepath.HD.0531)
+# length(files.HD.0531)
+```
+
+
+#Begin Concatenation 
+
+```{r}
+#Pattern to select the Target Barcode
+pattern <- "^.+\\/([BPRMK][A-Za-z0-9].+R)\\_.+"
+pattern.cells <- ".+\\/([KM][A-Za-z0-9].+R)\\_.+"
+pattern.sorted <- "^.+\\/TARG.+-(P.+)_RBS.+"
+pattern.0531 <- "^.+\\/TARGET.+-([PB].+[1-9]R).+"
+```
+
+```{r}
+#Select the column indices 
+selected.kallisto <- c("target_id",	"length",	"eff_length",	"est_counts",	"tpm")
+selected.sailfish <- c("transcript", "raw_counts", "median_length_normalized", "RPKM")
+```
+
+
+```{r}
+all.0531.files <- list(LD.0531=files.LD.0531, HD.0531=files.HD.0531)
+sel.0531 <- list(LD.0531=selected.kallisto, HD.0531=selected.sailfish)
+
+cated.0531 <- mapply(catExpnData, all.0531.files, sel.0531,
+                     MoreArgs = list(regex=pattern.0531,header=TRUE), SIMPLIFY = FALSE)
+
+```
+
+
+```{r}
+cated.sort <- catExpnData(filenames = sorted, regex = pattern.sorted, 
+                          cols = selected.kallisto, header = TRUE)
+
+sapply(cated.sort, dim) # 180,253  genes and 54 samples
+```
+
+
+```{r }
+cated <- catExpnData(filenames = target, regex = pattern, cols = selected.kallisto, header = TRUE)
+
+lapply(cated, dim)  
+# mapply(catExpnData,filesWithPath, patterns, MoreArgs = list(cols=selected,header=TRUE), SIMPLIFY = FALSE)
+# names(cated) <- c("TARGET", "Cells")
+# sapply(cated, function(x) sapply(x,dim)) %>% set_rownames(rep(c("genes", "samples"), 5))
+```
+
+
+
+#Add TPMs to Sailfish
+
+```{r}
+cated.0531$HD.0531[["TPM"]] <- apply(cated.0531$HD.0531$RPKM, 2, RPKM_to_TPM)
+
+options(scipen = 999)
+head(cated.0531$HD.0531$TPM[,1:5])
+```
+
+```{r}
+table(apply(cated.0531$HD.0531$TPM, 2, sum)) #all sum to 1 million per sample. 
+```
+
+
+#Check that the Gene Ids are in the Same Order
+
+```{r}
+lapply(cated, function(x) all(sapply(x$target_id, identical, y=x$target_id[,1])))
+# lapply(cated, function(x) all(sapply(x$tar, identical, y=x$gene_id[,1])))
+```
+
+```{r}
+table(apply(cated.0531$LD.0531$target_id, 2, function(col) identical(x=col, y=cated.0531$LD.0531$target_id[,1]))) #all 492 cols for transcript IDs identical. 
+```
+
+```{r}
+table(apply(cated.0531$HD.0531$transcript, 2, function(col) identical(x=col, y=cated.0531$HD.0531$transcript[,1])))
+```
+
+```{r}
+table(apply(cated.sort$target_id, 2, function(col) identical(x=col, y=cated.sort$target_id[,1]))) #all 54 identical order
+```
+
+
+#Add columns for the Gene Symbol and Ensembl Symbol 
+
+
+##High Depth 0531
+
+```{r}
+HD.0531 <- lapply(names(cated.0531$HD.0531)[2:5], function(x) addCols(df=as.data.frame(cated.0531$HD.0531[[x]]), 
+                                                                                 symbol = rep(NA,nrow(cated.0531$HD.0531[[x]])),
+                                                                                 id=cated.0531$HD.0531$transcript[,1])) %>%
+  set_names(names(cated.0531$HD.0531)[2:5])
+
+
+# lapply(HD.0531, function(x) head(x[,1:5]))
+```
+
+
+##Low Depth 0531
+
+```{r}
+source("~/scripts/conversion_scripts/Merge_Cat_FixDupIDs_Function.r")
+
+LD.0531 <- lapply(cated.0531$LD.0531,function(x)fixDupIDs(df=x,type="colnames"))
+# lapply(LD.0531, function(x) head(x[,1:5]))
+```
+
+```{r}
+LD.0531 <- lapply(names(LD.0531)[2:5], function(x) addCols(df=as.data.frame(LD.0531[[x]]), 
+                                                                                 symbol = rep(NA,nrow(LD.0531[[x]])),
+                                                                                 id=LD.0531$target_id[,1])) %>%
+  set_names(names(cated.0531$LD.0531)[2:5])
+
+
+# lapply(LD.0531, function(x) head(x[,1:5]))
+```
+
+
+## High Depth 1031
+
+```{r}
+sorted.1031 <- lapply(names(cated.sort)[2:5], function(x) addCols(df=as.data.frame(cated.sort[[x]]), 
+                                                                  symbol = rep(NA,nrow(cated.sort[[x]])), 
+                                                                  id=cated.sort$target_id[,1])) %>%
+  set_names(names(cated.sort)[2:5])
+
+# lapply(sorted.1031, function(x) head(x[,1:5]))
+```
+
+
+```{r}
+cated.1031 <- lapply(names(cated)[2:5], function(x) addCols(df=as.data.frame(cated[[x]]), 
+                                                                  symbol = rep(NA,nrow(cated[[x]])), 
+                                                                  id=cated$target_id[,1])) %>%
+  set_names(names(cated)[2:5])
+```
+
+
+toAddCols <- c("length", "eff_length", "est_counts", "tpm")
+
+withCols <- lapply(cated, function(x) lapply(x[toAddCols], addCols, id=x$target_id[,1]))
+
+lapply(withCols, function(x) lapply(x, function(i) head(i[,1:5])))
+
+
+
+
+#Save the output
+
+```{r}
+# save(cated, file="TARGET_AML_1031_cat_trancriptLevel_rnaseq.RData")
+```
+
+
+```{r}
+# lapply(names(LD.0531), function(x) write.csv(LD.0531[[x]][,-1], paste0("TARGET_AML_AAML0531_Kallisto_Transcript_LowDepth_RNASeq_",x, ".csv"),row.names = FALSE))
+
+# lapply(names(HD.0531), function(x) write.csv(HD.0531[[x]][,-1], paste0("TARGET_AML_AAML0531_Sailfish_Transcript_HighDepth_RNASeq_",x, ".csv"),row.names = FALSE))
+
+# lapply(names(sorted.1031), function(x) write.csv(sorted.1031[[x]][,-1], paste0("TARGET_AML_AAML1031_Kallisto_Transcript_RNASeq_FlowSorted_",x, ".csv"),row.names = FALSE))
+
+lapply(names(cated.1031), function(x) write.csv(cated.1031[[x]][,-1],paste0("TARGET_AML_AAML1031_Kallisto_Transcript_RNASeq_",x, ".csv"),row.names = FALSE))
+
+```
+
+
+
+for (i in 1:2){
+  n <- ifelse(names(withCols[i]) == "TARGET", "TARGET_AML_AAML1031_Kallisto_Transcript_RNASeq_", "Kasumi_MV4-11_Kallisto_Transcript_RNASeq_")
+  
+  for (idx in toAddCols){
+    filename <- paste0(n, idx,".csv")
+    write.csv(withCols[[i]][[idx]], filename, row.names = FALSE)
+  }
+  
+}
+
+
+
+
+#Add Gene name information 
+
+
+```{r}
+IDmap <- read.csv("~/RNA_seq_Analysis/0000.00.02_Reference_GeneInfo/Homo_sapiens.GRCh37.87_Transcript.Gene.IDmap.csv", stringsAsFactors = FALSE)
+
+
+# head(IDmap)
+# dim(IDmap)  #196,501
+```
+
+
+```{r}
+IDmap.75 <- read.csv("~/RNA_seq_Analysis/0000.00.02_Reference_GeneInfo/Homo_sapiens.GRCh37.75_Transcript.Gene.IDmap.csv", stringsAsFactors = FALSE)
+
+# head(IDmap.75)
+# dim(IDmap.75) #215170 
+```
+
+
+```{r}
+IDmap.76 <- read.csv("~/RNA_seq_Analysis/0000.00.02_Reference_GeneInfo/Homo_sapiens.GRCh38.76_Transcript.Gene.IDmap.csv", stringsAsFactors = FALSE, row.names = 1)
+
+# head(IDmap.76)
+# dim(IDmap.75) #206183      4
+```
+
+ 
+```{r}
+sorted.w.genes <- sorted.1031$tpm[,-1] %>% 
+  select(transcript_id_version=gene_id, everything()) %>% 
+  # filter(rowSums(select(., -transcript_id)) > 0) %>%
+  mutate(transcript_id=gsub("\\.[0-9]{1,2}", "", transcript_id_version)) %>%
+  left_join(., IDmap, by=c("transcript_id")) %>%
+  select(gene_id,gene_name,transcript_id, transcript_name, everything())
+  
+# options(scipen = 999)
+# sorted.w.genes #180,253 txs total and 168,395 txs w/0 all zeros
+```
+
+
+There are 11,858 genes without all zeros. Will filter these out. 15,440 w/0 gene name info
+
+there are 16,723 txs wihtout gene info in the entire dataset. 
+
+
+#Fill in missing gene names
+
+```{r}
+missing <- sorted.w.genes %>%
+  filter(is.na(gene_name)) %>%
+  select(-matches("gene|name"))
+
+head(missing[,1:5])
+```
+
+```{r}
+#Missing Genes
+missing %>%
+  select(transcript_id) %>%
+  unlist() %>%
+  length()
+  # cat(., file = "~/Unmapped_Transcript_Ids_GRCh37.87.csv", sep = "\n")
+```
+
+```{r}
+#Created with online ID history conversion tool through ensembl, using IDs from cat() function above.
+#NOTE: Has about 587 duplicate entries in transcriptID
+remapped <- read.csv("Homo_sapiens_GRCh37.87_Tools_IDHistoryConverter.csv", 
+                     stringsAsFactors = FALSE) 
+head(remapped)
+# dim(remapped) # 10219     3
+```
+
+```{r}
+releases <- remapped$Releases %>%
+  str_split(., " ")  %>% 
+  sapply(., function(x) grep("^[0-9]{2}",x, value=TRUE)) %>%
+  unlist() %>%
+  gsub(":", "", .) %>%
+  table() %>%
+  .[order(., decreasing = TRUE)]
+
+releases #the majority might be found in ensembl v76 
+```
+
+
+```{r}
+updated <- missing %>%
+  select(transcript_id, transcript_id_version) %>%
+  left_join(., remapped, by=c("transcript_id"="Requested.ID")) %>%
+  left_join(., IDmap.76, by=c("Matched.ID.s."="transcript_id")) %>% #gene_id.x
+  left_join(., IDmap.75, by=c("transcript_id"="transcript_id")) %>% #gene_id.y
+  # left_join(., IDmap.76, by=c("Matched.ID.s."="transcript_id")) %>% #gene_id
+  mutate_at(vars("gene_id.x"), funs(ifelse(is.na(.),  gene_id.y, .))) %>%
+  mutate_at(vars("gene_name.x"), funs(ifelse(is.na(.),  gene_name.y, .))) %>%
+  mutate_at(vars("transcript_name.x"), funs(ifelse(is.na(.),  transcript_name.y, .))) %>%
+  select(transcript_id,transcript_id_version, Matched.ID.s.,Releases,
+         gene_id_v76_v75=gene_id.x, gene_name_v76_v75=gene_name.x, transcript_name_v76_v75=transcript_name.x,
+         gene_id_v75=gene_id.y, gene_name_v75=gene_name.y, transcript_name_v75=transcript_name.y) %>%
+  arrange(desc(Releases))
+
+# updated
+dim(updated) #17013 by    10. due to duplicate transript IDs in the "remapped" df from ensemble.
+```
+
+
+```{r}
+#Resolve the duplicate entries, introduced in the ensembl ID history mapping. 
+dups <- unique(updated$transcript_id[duplicated(updated$transcript_id)]) #288
+
+rmDups <- bind_rows(lapply(dups, function(x) 
+  collapseDuplicates(df=updated, ID.column = "transcript_id", duplicate=x))) %>%
+  mutate_at(vars(contains("v76_v75")), funs(gsub(";.+", "", .))) %>% #keeping only the gene id from the most recent release its found in.
+  rbind(., filter(updated, !transcript_id %in% dups)) %>%
+  arrange(transcript_id)
+
+# head(rmDups)
+dim(rmDups) #16723  by   9
+# write.csv(rmDups, "~/RNA_seq_Analysis/0000.00.02_Reference_GeneInfo/Homo_sapiens_Ensembl_v75_v76_v87_Transcript.Gene.IDmap_ForMissingIDs.csv", row.names = FALSE)
+```
+
+
+#Finalize the Transcript/Gene names
+
+```{r}
+sorted.updated <- missing %>%
+  left_join(., select(rmDups, transcript_id, gene_id=gene_id_v76_v75, 
+                      gene_name=gene_name_v76_v75, transcript_name=transcript_name_v76_v75), 
+            by="transcript_id") %>%
+  select(gene_id,gene_name,transcript_id,transcript_id_version,transcript_name, everything()) %>%
+  bind_rows(., filter(sorted.w.genes, ! is.na(gene_name)))
+
+
+# head(sorted.updated[,1:5])
+dim(sorted.updated) # 180253     59
+# write.csv(sorted.updated, "~/RNA_seq_Analysis/0000.00.03_Expression_Matrices/TARGET_AML_AAML1031_Kallisto_Transcript_w.Gene.IDs_RNASeq_FlowSorted_tpm.csv", row.names = FALSE)
+```
+
+```{r}
+#Save the IDmapping for later uses
+# sorted.updated %>%
+#   select(gene_id, gene_name, transcript_id, transcript_id_version, transcript_name) %>%
+#   write.csv(., "Homo_sapiens_Ensembl_v75_v76_v87_Transcript.Gene.IDmap.csv", row.names = FALSE)
+```
+
+
+
+# Map Gene IDs to the full sized Matrix
+
+```{r}
+IDmap <- read.csv("~/RNA_seq_Analysis/0000.00.02_Reference_GeneInfo/Homo_sapiens_Ensembl_v75_v76_v87_Transcript.Gene.IDmap.csv")
+dim(IDmap)
+
+head(IDmap)
+```
+
+
+```{r}
+tx <- read.csv("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level3/transcript/concat_matrices/2017July_BCCA_1031_Kallisto_Illumina_data/AML_MPN/TARGET_AML_AAML1031_Kallisto_Transcript_RNASeq_tpm.csv")
+
+dim(tx) # 180253   1512
+head(tx[,1:5])
+```
+
+
+```{r}
+tx.w.genes <- tx %>%
+  mutate(gene_id=str_split_fixed(gene_id, "\\.", n=2)[,1]) %>%
+  dplyr::select(transcript_id=gene_id, everything()) %>%
+  
+  left_join(.,  IDmap, by="transcript_id") %>%
+  dplyr::select(gene_id,gene_name,transcript_id, transcript_name, everything())
+
+head(tx.w.genes[,1:10])
+dim(tx.w.genes)
+all(complete.cases(tx.w.genes))
+```
+
+
+```{r}
+tx.w.genes <- tx.w.genes %>%
+  dplyr::select(-transcript_id_version) %>%
+  rename_all(funs(gsub("RNA.mRNAseq.level3.transcript.2017July_BCCA_1031_Kallisto_Illumina_data.", "", .))) %>%
+  rename_all(funs(gsub("X.fh.fast.meshinchi_s.workingDir.TARGET.AML_TARGET.", "", .))) %>%
+  rename_all(funs(gsub("_merged_.+", "", .)))
+```
+
+
+```{r}
+write.csv(tx.w.genes, "~/RNA_seq_Analysis/0000.00.03_Expression_Matrices/TARGET_AML_1031_kallisto_withGeneID_TPM.csv", row.names = FALSE)
+# 
+# tx.w.genes <- read.csv("~/RNA_seq_Analysis/0000.00.03_Expression_Matrices/TARGET_AML_1031_kallisto_withGeneID_TPM.csv", stringsAsFactors=FALSE)
+```
+
+
+#Examine the Genes  of interest
+
+```{r}
+CD33 <- tx.w.genes %>%
+  filter(grepl("CD33", gene_name, ignore.case = TRUE)) %>%
+  select(transcript_id, everything(), -gene_id, -gene_name, -transcript_name) %>%
+  gather(var,val, -transcript_id) %>%
+  group_by(var) %>%
+  mutate(DominantSpecies=ifelse(val==max(val), transcript_id, "NotDominant")) %>%
+  spread(transcript_id, val) %>%
+  mutate_if(is.numeric, funs(replace(.,is.na(.),0))) %>%
+  mutate_if(is.numeric, funs(sum)) %>%
+  filter(DominantSpecies != "NotDominant") 
+
+dim(CD33)
+# write.csv(CD33, "~/RNA_seq_Analysis/0000.00.03_Expression_Matrices/TARGET_AML_1031_kallisto_CD33_Transcripts_TPM.csv", row.names = FALSE
+```
+
+
+```{r}
+HOXA1 <- tx.w.genes %>%
+  filter(grepl("HOXA1$", gene_name, ignore.case = TRUE)) %>%
+  select(transcript_id, everything(), -gene_id, -gene_name, -transcript_name) %>%
+  gather(var,val, -transcript_id) %>%
+  
+  group_by(var) %>%
+  mutate(DominantSpecies=ifelse(val==max(val), transcript_id, "NotDominant")) %>%
+  mutate(DominantSpecies=ifelse(val==max(val) & max(val) == 0,"NotExpressed",DominantSpecies)) %>%
+  spread(transcript_id, val) %>%
+  
+  mutate_if(is.numeric, funs(replace(.,is.na(.),0))) %>%
+  mutate_if(is.numeric, funs(sum)) %>%
+  ungroup() %>%
+ 
+  filter(DominantSpecies != "NotDominant") %>%
+  mutate(Group=ifelse(grepl("^BM|RO", var), "NBM", "AML")) %>%
+  select(var,Group, everything())
+
+options(scipen = 999)
+dim(HOXA1)  #1112    5
+head(HOXA1)
+# write.csv(HOXA1, "~/RNA_seq_Analysis/0000.00.03_Expression_Matrices/TARGET_AML_1031_kallisto_HOXA1_Transcripts_TPM.csv", row.names = FALSE)
+```
+
+
+```{r}
+# table(HOXA1$Group)
+quantile(HOXA1$ENST00000343060)
+quantile(HOXA1$ENST00000355633)
+```
+
+
+```{r}
+KLF4 <- tx.w.genes %>%
+  filter(grepl("KLF4$", gene_name, ignore.case = TRUE)) %>%
+  select(transcript_id, everything(), -gene_id, -gene_name, -transcript_name) %>%
+  gather(var,val, -transcript_id) %>%
+  group_by(var) %>%
+  mutate(DominantSpecies=ifelse(val==max(val), transcript_id, "NotDominant")) %>%
+  mutate(DominantSpecies=ifelse(val==max(val) & max(val) == 0,"NotExpressed",DominantSpecies)) %>%
+  spread(transcript_id, val) %>%
+  mutate_if(is.numeric, funs(replace(.,is.na(.),0))) %>%
+  mutate_if(is.numeric, funs(sum)) %>%
+  ungroup() %>%
+  filter(DominantSpecies != "NotDominant") %>%
+  mutate(Group=ifelse(grepl("^BM|RO", var), "NBM", "AML")) %>%
+  select(var,Group, everything())
+
+options(scipen = 999)
+dim(KLF4)  #1112    5
+head(KLF4)
+```
+
+```{r}
+colnames(KLF4) %>% grep("ENST00000493306",., value = TRUE) #has intron inclusion 
+```
+
+
+```{r}
+# write.csv(KLF4, "~/RNA_seq_Analysis/0000.00.03_Expression_Matrices/TARGET_AML_1031_kallisto_KLF4_Transcripts_TPM.csv", row.names = FALSE)
+```
+
+
+
+NOTE:
+
+If markdown cannot be completed with pandoc (memory issues), use the following
+
+> library("rmarkdown")
+> render("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/TARGET_AML_1031_Cat_RNAseq.Rmd", "html_document")
+
+
+#Session Info
+
+```{r}
+sessionInfo()
+```
+
+
+
+#Older Code
+
+pca_custom <- function(expnData,CDE,col.column){
+  
+  expnData <- expnData[,intersect(CDE$Patient_ID,colnames(expnData))]
+  
+  # print(dim(expnData))
+  pca <- prcomp(t(expnData), scale=TRUE)
+  summ <- summary(pca)
+
+  scores <- as.data.frame(pca$x) %>%
+    rownames_to_column("Patient_ID") %>%
+    inner_join(., CDE, by="Patient_ID") %>%
+    select(Patient_ID, USI, Group, Batch, everything())
+
+  pca.plot <- ggplot(scores, aes(x=PC1, y=PC2, color=Group)) +
+    geom_point(size=4, alpha=0.85) +
+    scale_color_manual(values=c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00","#A65628")) +
+    labs(x=paste("PC1: ", round(summ$importance[2,1], digits=3)*100, "% variance explained"),
+         y=paste("PC2: ", round(summ$importance[2,2], digits=3)*100, "% variance explained")) +
+    theme_numX  +
+    theme(legend.text = element_text(size=16),
+          legend.title = element_blank())
+
+    res <- list(pca=pca,plot=pca.plot)
+    return(res)
+  
+}
+
+pca.all <- pca_custom(expnData = Log2.CPM, CDE=info)
+
+pca.all$plot
+ggsave(pca.all$plot, filename = "TARGET_AML_1031_AllFlowSortedSamples_PCAplot.tiff", device = "tiff",
+       dpi=200, height = 5, width = 10, units = "in")
+
+

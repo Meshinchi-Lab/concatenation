@@ -1,0 +1,287 @@
+---
+title: "Download Leugene RNA-seq data from GEO"
+author: "Jenny Smith"
+date: "12/17/19"
+output: html_document
+---
+
+#Set-up 
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, 
+                      fig.align='center', fig.width = 10, fig.height = 10)
+
+knitr::opts_knit$set(root.dir = file.path(WORKINGDIR, "Leucegene/RNA/analysis/2019.12.17_Leucegene_download"))
+
+# knitr::opts_knit$set(root.dir = file.path("/fh/fast/meshinchi_s/workingDir/Leucegene/RNA/level3/gene/2013July_Leucegene_Illumina_data/"))
+options(stringsAsFactors = FALSE,bitmapType = 'cairo', device='x11')
+grDevices::X11.options(type='cairo')
+```
+
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(Cairo)
+library(gridExtra)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(readr)
+# library(DeGSEA)
+source(file.path(SCRIPTS,"conversion_scripts/Merge_Cat_FixDupIDs_Function.r"))
+getwd()
+```
+
+```{r message=FALSE}
+# BiocManager::install("GEOquery")
+library(GEOquery)
+```
+
+#Define Functions
+
+```{r}
+#Function for the TPM conversion. 
+# Based on https://groups.google.com/forum/#!topic/rsem-users/W9RQrZIOzA4
+#Useage: sapply(cated$RPKM, RPKM_to_TPM)
+
+RPKM_to_TPM <- function(RPKM){
+  conversionFactor <- sum(RPKM) / 1E6
+  TPM <- RPKM / conversionFactor
+  return(TPM)
+}
+```
+
+```{r}
+#https://stackoverflow.com/questions/32040742/dplyrselect-including-all-other-columns-at-end-of-new-data-frame-or-beginni
+
+addCols <- function(df,symbol){
+  library(dplyr)
+  
+  df <- df %>%
+    as.data.frame() %>%
+    mutate(geneSymbol=symbol) %>%
+    select(geneSymbol, everything())
+  
+  return(df)
+}
+```
+
+
+#Read in the GSE Objects
+
+```{r message=FALSE}
+GSE48173_AMLp1_ALL_CD34pos <- getGEO(GEO="GSE48173", 
+              destdir = file.path(SCRATCH,"jlsmith3/Leucegene"),
+              GSEMatrix=FALSE) #72 samples
+```
+
+```{r message=FALSE}
+GSE51984_normal_celltypes <- getGEO(GEO="GSE51984", 
+              destdir = file.path(SCRATCH,"jlsmith3/Leucegene"),
+              GSEMatrix=FALSE) #25 samples
+```
+
+```{r message=FALSE}
+GSE52656_AMLp2 <- getGEO(GEO="GSE52656", 
+              destdir = file.path(SCRATCH,"jlsmith3/Leucegene"),
+              GSEMatrix=FALSE) #27 samples
+```
+
+```{r message=FALSE}
+GSE62190_AMLp3 <- getGEO(GEO="GSE62190", 
+              destdir = file.path(SCRATCH,"jlsmith3/Leucegene"),
+              GSEMatrix=FALSE) 
+```
+
+```{r message=FALSE}
+GSE66917_AMLp4 <- getGEO(GEO="GSE66917", 
+              destdir = file.path(SCRATCH,"jlsmith3/Leucegene"),
+              GSEMatrix=FALSE) 
+```
+
+```{r message=FALSE}
+GSE67039_AMLp5 <- getGEO(GEO="GSE67039", 
+              destdir = file.path(SCRATCH,"jlsmith3/Leucegene"),
+              GSEMatrix=FALSE) 
+```
+
+```{r}
+res <- ls(pattern = "GSE")
+res
+```
+
+
+
+#Metadata for the GSE objects
+
+```{r}
+mdata <- lapply(res,function(x) Meta(get(x)))
+names(mdata) <- res
+# mdata
+# str(mdata)
+```
+
+
+#Extract Sample Information
+
+```{r}
+sampleData <- lapply(res,function(x) GSMList(get(x)))
+names(sampleData) <- res
+# str(sampleData$gse$GSM1185603)
+#sampleData$gse_AML_p2$GSM1273615@header
+```
+
+```{r}
+sampleList <- list()
+for(i in 1:length(sampleData)){
+  dat <- sampleData[[i]]
+  sampleList <- c(sampleList,dat)
+}
+rm(dat)
+length(sampleList) #490
+```
+
+```{r}
+manifest <- lapply(sampleList,
+                   function(sample) lapply(sample@header, 
+                   function(x) ifelse(length(x) > 1, paste(x, collapse = "; "), x)) %>% 
+                     as.data.frame()) %>% 
+  bind_rows() %>%
+  select(geo_accession,Group=source_name_ch1,everything())
+
+dim(manifest)
+head(manifest) #490 by33
+
+# write.csv(manifest, "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/SequencingDataMatrix/Leucegene_RNAseq_Data_12.17.19.csv", row.names = FALSE)
+```
+
+#Downloaded and Concatentate the  Expression Matrices
+
+each file was downloaded directly through the GEO website portal and then un-tared and un-gzipped through command line. 
+
+This method was chosen since it was more simple than the many manipulations it would take for the GSE class objects to retrieve the expression data. 
+
+RNA sequencing data is accessible through GEO or SRA.
+More specifically, the following datasets are available:
+
+*GEO Accession Numbers to Tar ball downloads:*
+Leucegene: ALL sequencing – Accession # GSE49601.
+Leucegene: AML sequencing – Accession # GSE49642.
+Leucegene: AML sequencing (part 2) – Accession # GSE52656.
+Leucegene: AML sequencing (part 3) – Accession # GSE62190.
+Leucegene: AML sequencing (part 4) – Accession # GSE66917.
+Leucegene: AML sequencing (part 5) – Accession # GSE67039.
+Transcriptome of Primitive Human Hematopoietic Cells: A New Resource to Find hHSC-Specific Genes – Accession: # GSE48846 and #GSE51984.
+Transcriptome analysis of G protein-coupled receptors in distinct genetic subgroups of AML – Accession: GSE98310 .
+
+
+
+
+Columns are: Chromosome, Start location, Stop location, Gene, RPKM, base count.
+
+ 	
+```{r}
+files <- dir(file.path(SCRATCH,"jlsmith3/Leucegene"), 
+             pattern = ".txt",full.names = TRUE)
+
+head(files)
+length(files)
+```
+
+```{r}
+all_samples <- str_split_fixed(files,pattern = "[/_]",n=12)
+all_samples[,12] <- files
+# head(all_samples)
+
+sampleNames <- lapply(sampleData, names)
+# sampleNames
+
+fileList <- lapply(sampleNames, function(x) all_samples[which(all_samples[,9] %in% x),12])
+lapply(fileList, length)
+lapply(fileList,head)
+```
+
+```{r}
+cated <- lapply(fileList, function(files) 
+                    catExpnData(filenames = files,
+                     regex= "^.+(GSM.+_.+[0-9B])_.+",
+                     cols = c(4:6),
+                     header = FALSE) %>% set_names(.,c("Gene","RPKM","Counts")))
+length(cated)
+```
+
+```{r}
+lapply(cated, function(list) lapply(list, function(x) head(x[,1:5])))
+lapply(cated, function(list) sapply(list, dim))
+```
+
+
+#Check that the Gene Ids are in the Same Order
+
+```{r}
+for (i in 1:length(cated)){
+  OK <- apply(cated[[i]]$Gene,2, 
+              function(x) identical(x=x,y=cated[[i]]$Gene[,1]))
+  print(all(OK))
+}
+```
+
+
+
+#Add columns for the Gene Symbol and TPMs 
+
+#Add in TPMs 
+
+```{r}
+cated$gene[["TPM"]] <- apply(cated$gene$RPKM,2, RPKM_to_TPM)
+
+table(apply(cated$gene[["TPM"]], 2, sum)) #all sum to 1 million 
+```
+
+
+```{r}
+withCols <- list()
+for(i in 1:6){
+  Names <- paste(names(cated)[i], c("Counts","RPKM","TPM"), sep="_")
+  # print(Names)
+  # print(i)
+  
+  cts <- addCols(df=cated[[i]]$Counts, symbol = cated[[i]]$Gene[,1])
+  rpkm <- addCols(df=cated[[i]]$RPKM, symbol = cated[[i]]$Gene[,1])
+  tpm <- addCols(df=apply(cated[[i]]$RPKM,2,RPKM_to_TPM), symbol = cated[[i]]$Gene[,1])
+
+  withCols[Names] <- list(cts,rpkm,tpm)
+  rm(cts,tpm,rpkm)
+
+}
+
+# length(withCols)
+```
+
+```{r}
+idx <- grep("TPM", names(withCols))
+sapply(idx, function(x)  table(sapply(withCols[[x]][,-1],sum))) #OK sum to 1 million
+```
+
+```{r}
+lapply(withCols, function(x)head(x[,1:5]))
+```
+
+
+#Save the Datasets
+
+```{r}
+# lapply(names(withCols),
+#        function(x) write.csv(withCols[[x]], paste0("Leucegene_",x,".csv"), row.names = FALSE))
+```
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+

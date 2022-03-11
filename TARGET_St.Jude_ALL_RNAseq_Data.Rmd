@@ -1,0 +1,136 @@
+---
+title: "Identify ALL RNA-seq datasets for Meshinchi Lab"
+author: "Jenny Smith"
+date: "5/26/2020"
+output: html_document
+---
+
+```{r setup}
+library(knitr)
+
+p1 <- substr(TARGET, 1,34)
+# dir(file.path(p1,"DNAnexus"))
+knitr::opts_knit$set(root.dir = file.path(WORKINGDIR,"DNAnexus"))
+
+
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, 
+                      fig.align='center', fig.width = 10, fig.height = 10)
+options(stringsAsFactors = FALSE,bitmapType = 'cairo', device='x11')
+grDevices::X11.options(type='cairo')
+```
+
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(Cairo)
+library(gridExtra)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(readr)
+library(DeGSEA)
+getwd()
+```
+
+
+# ClinData
+
+```{r}
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_5.29.20.csv"))
+
+
+dim(merged)
+```
+
+
+# Manifests
+
+```{r}
+cloud.data <- read.delim("SAMPLE_INFO.txt")
+
+dim(cloud.data) #19558    18
+head(cloud.data)
+```
+
+```{r}
+table(cloud.data$sequencing_type)
+```
+
+```{r}
+filter(cloud.data, sequencing_type == "RNA-Seq", grepl(".bam$",file_path)) %>%
+  dim() #688 RNA-seq samples
+```
+
+
+```{r}
+sj_supplemental <- read.csv("St.Jude_Pan_ALL_Clinical_Data_Mulligan_NatureGenetics_2019.csv", 
+                            check.names = FALSE)
+colnames(sj_supplemental) <- gsub("<a0>|<e0>","",enc2utf8(colnames(sj_supplemental)))
+
+
+# dim(sj_supplemental) #1988   30
+head(sj_supplemental)
+```
+
+```{r}
+# sj_supplemental$patient
+# cloud.data$subject_name
+```
+
+```{r}
+length(unique(cloud.data$subject_name)) #2096
+length(unique(sj_supplemental$patient)) #1988
+```
+
+```{r}
+sum(sj_supplemental$patient %in% cloud.data$subject_name)
+```
+
+# Merge Data Accessable to Supplemental Data 
+
+```{r}
+dua <- cloud.data %>% 
+  inner_join(., sj_supplemental, by=c("subject_name"="patient"))
+
+
+dim(dua)
+```
+
+
+```{r}
+table(dua$sequencing_type)
+```
+
+```{r}
+rna.seq <- dua %>% 
+  filter(sequencing_type == "RNA-Seq") %>% 
+  filter(grepl("\\.bam$", file_path)) %>%
+  select(subject_name,sequencing_type,`RNA-seq library`, everything())
+
+
+dim(rna.seq) #317  47
+head(rna.seq)
+```
+
+```{r}
+table(duplicated(rna.seq$subject_name))
+```
+
+```{r}
+filter(rna.seq, duplicated(subject_name) | duplicated(subject_name, fromLast = TRUE)) %>% 
+  arrange(subject_name) %>% 
+  head()
+```
+
+
+
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+

@@ -1,0 +1,169 @@
+---
+  title: "Concatenate RNA-seq"
+author: "Jenny Smith"
+date: "August 7, 2017"
+output: html_document
+---
+  
+  
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 8, fig.width = 10)
+knitr::opts_knit$set(root.dir = '/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2018.08.07_Concatenate_DS.AML_RNAseq/')
+```
+
+```{r message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(reshape2)
+getwd()
+```
+
+```{r}
+source("~/scripts/conversion_scripts/Merge_Cat_FixDupIDs_Function.r")
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/rmDupGenes_Function.r")
+```
+
+
+
+
+#Define Functions to be used. 
+
+```{r}
+#Function for the TPM conversion. 
+# Based on https://groups.google.com/forum/#!topic/rsem-users/W9RQrZIOzA4
+#Useage: sapply(cated$RPKM, RPKM_to_TPM)
+
+RPKM_to_TPM <- function(RPKM){
+  conversionFactor <- sum(RPKM) / 1E6
+  TPM <- RPKM / conversionFactor
+  return(TPM)
+}
+```
+
+
+```{r}
+#https://stackoverflow.com/questions/32040742/dplyrselect-including-all-other-columns-at-end-of-new-data-frame-or-beginni
+
+addCols <- function(df,symbol){
+  library(dplyr)
+  
+  df <- df %>%
+    as.data.frame() %>%
+    mutate(geneSymbol=symbol) %>%
+    select(geneSymbol, everything())
+  
+  return(df)
+}
+```
+
+
+
+#Identify Files to Be Concatenated
+
+```{r}
+filepath <-  "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level3/gene/2018Aug_FHCRC_1031_Illumina_data/"
+
+allfiles <- paste0(filepath, dir(path = filepath, 
+                                 pattern = ".hts"))
+
+head(allfiles)
+```
+
+
+```{r}
+length(allfiles) #6 AML files 
+```
+
+
+
+#Columns Description
+
+1. Gene Names
+2. Counts from HTSeq
+
+#Begin Concatenation 
+
+
+```{r}
+#Pattern to select the Target Barcode
+pattern <- "^.+\\/([DM]._[0-9]{2}_[0-9].+)\\_STAR.+"
+
+```
+
+```{r}
+#Select the column indices 
+selected <- c(1,2)
+```
+
+```{r results='hide'}
+
+cated <- catExpnData(filenames = allfiles,regex =  pattern, cols = selected, header = FALSE)
+names(cated) <- c("geneSymbol","Counts")
+```
+
+```{r}
+lapply(cated, head)
+
+lapply(cated,dim)
+```
+
+
+#Convert RPKM to TPM 
+
+```{r}
+options(scipen = 999)
+
+for (i in 1:2){
+  names(cated[[i]]) <- c("gene_id","geneSymbol", "FractionalCounts", "RPKM")
+  cated[[i]][["TPM"]] <- data.frame(sapply(cated[[i]]$RPKM, RPKM_to_TPM))
+}
+
+```
+
+
+
+#Check that the Gene Ids are in the Same Order
+
+
+```{r}
+apply(cated$geneSymbol,2, function(x) identical(x=x,y=cated$geneSymbol[,1]))
+```
+
+
+
+#Add columns for the Gene Symbol and Ensembl Symbol 
+
+
+```{r}
+
+withCols <- addCols(df=cated$Counts, symbol = cated$geneSymbol[,1])
+
+head(withCols)
+# lapply(withCols, function(x) lapply(x, function(i) head(i[,1:5])))
+```
+
+
+#Save the output
+
+```{r}
+# write.csv(withCols, "TARGET_AML_1031_DS.AML_HTSeq_Counts.csv", row.names = FALSE)
+```
+
+
+
+NOTE:
+  
+  If markdown cannot be completed with pandoc (memory issues), use the following
+
+> library("rmarkdown")
+> render("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/TARGET_AML_1031_Cat_RNAseq.Rmd", "html_document")
+
+
+#Session Info
+
+```{r}
+sessionInfo()
+```
+

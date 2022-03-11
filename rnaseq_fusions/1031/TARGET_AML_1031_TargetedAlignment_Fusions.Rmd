@@ -1,0 +1,554 @@
+---
+title: "AAML1031 Fusions"
+author: "Jenny Smith"
+date: "September 11, 2018"
+output: html_document
+---
+
+#Set-up 
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 8, fig.width = 10)
+knitr::opts_knit$set(root.dir = '/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2017.09.15_Fusions_K.Mungall/')
+
+options(stringsAsFactors = FALSE)
+```
+
+
+```{r message=FALSE}
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(stringr)
+library(reshape2)
+library(tidyr)
+library(tibble)
+getwd()
+```
+
+
+#Define Functions to be used 
+
+```{r}
+getFusionsExons <- function(probes){
+  #probes is the character vector to be split 
+  library(magrittr)
+  library(stringr)
+  
+  
+  #define functions
+  getGeneName <- function(string){gsub("^([A-Z0-9].+)\\#.+","\\1", string)}
+  getExonName <- function(string){gsub("[\\+\\-]2.+", "", string) %>% gsub("[[:punct:]]", "", .)}
+  
+  #string split the fusions
+  fusionCategory <- data.frame(str_split_fixed(probes, pattern = "\\->", n=2))
+  
+      genes <- sapply(fusionCategory, getGeneName)
+      GName <- paste(genes[,1], genes[,2], sep="-")
+
+      exons <- sapply(fusionCategory, getExonName)
+      EName <- paste(exons[,1], exons[,2], sep="-")
+
+      locus <- str_split_fixed(fusionCategory[,2], "_", 3)[,2] %>%
+        gsub("\\/","-", . )
+      
+      tx <- str_split_fixed(fusionCategory[,2], "_", 3)[,3] %>% 
+        gsub("\\s$", "", .) %>%
+        gsub("_", "-", .)
+
+      parsed <- cbind(GName,EName,locus,tx) %>%
+        set_colnames(c("FusionName","FusionExons", "Breakpoint","FusionTranscript")) %>%
+        as.data.frame()
+  
+  return(parsed)
+}
+```
+
+```{r}
+collapseRows <- function(col, uniq=FALSE){
+  #designed for dplyr so that col is the vector of the column name
+  if (uniq){col <- unique(col)}
+  
+  collapsed <- ifelse(all(is.na(col)), NA, paste(col, collapse = "; "))
+  return(collapsed)
+}
+```
+
+
+#Read in 1031 Clinical Data
+
+```{r}
+CDE.1031 <- read.csv("~/reference_mapping-files/AAML1031_Target_CDEs_with_HiAR_and_PrimaryCyto_withFusionCalls_10.11.2018.csv")
+
+head(CDE.1031[,1:5])
+dim(CDE.1031)
+```
+
+
+#Read in the Fusions
+
+```{r}
+fusions1 <- read.csv("FusionExpn/batch1_336_libraries_probing_results_38_match_6_hits_with_exid.csv", 
+                    stringsAsFactors = FALSE)
+
+head(fusions1[,1:2])
+```
+
+
+```{r}
+dim(fusions1) #117, by 336
+```
+
+```{r}
+fusions2 <- read.csv("FusionExpn/batch2_380_libraries_probing_results_38_match_6_hits_extid.csv", 
+                     stringsAsFactors = FALSE)
+colnames(fusions2)[2:ncol(fusions2)] <-  gsub("-", ".", fusions2[fusions2$probes == "patient_identifier",2:ncol(fusions2)])
+head(fusions2[,1:2])
+```
+
+```{r}
+dim(fusions2) #131 rows with 380 patients
+```
+
+
+```{r}
+fusions3 <- read.csv("FusionExpn/batch3_398_libraries_probing_results_38_match_6_hits_extid.csv", 
+                     stringsAsFactors = FALSE)
+
+colnames(fusions3)[2:ncol(fusions3)] <-  gsub("-",".",fusions3[fusions3$probe == "patient_identifier",2:ncol(fusions3)])
+head(fusions3[,1:2])
+```
+
+```{r}
+dim(fusions3) #130 probes with 398 patients
+```
+
+
+The last two rowsin each fusions dataset are library IDs for BCCA, while externeal ID also for BCCA
+
+
+#Merge the Fusion Data Sets
+
+
+```{r}
+fusions <- fusions1[-(116:117), ] %>%
+  full_join(., fusions2[-(130:131), ], by="probes") %>%
+  full_join(., fusions3[-(129:130),], by= c("probes"="probe")) %>%
+  gather(PATIENT_ID, Hit.Count,-probes) %>%
+  
+  #Due to not all probes being in all 3 batches of fusions calls, there are NAs from the merge. 
+  #For the sake of filtering, we will change NA to zero 
+  mutate(Hit.Count=ifelse(is.na(Hit.Count), 0, Hit.Count)) %>%
+  mutate(Hit.Count=as.numeric(as.character(Hit.Count)))
+
+dim(fusions) #257334  by    3
+head(fusions)
+
+# range(fusions$Hit.Count) #6 to 1123
+length(unique(fusions$USI))
+```
+
+
+#Tally the Fusions per Patient
+
+```{r}
+fusion.fmt <- fusions %>%
+  select(PATIENT_ID, everything()) %>%
+  bind_cols(., getFusionsExons(.$probes)) %>%
+  mutate(Fusion.Detected.K_Mungall="Yes", 
+         
+         GeneA=str_split_fixed(FusionName, "-", n=2)[,1],
+         GeneB=str_split_fixed(FusionName, "-", n=2)[,2], 
+         
+         Breakpoint_GeneA=str_split_fixed(Breakpoint, "-", n=2)[,1], 
+         Breakpoint_GeneB=str_split_fixed(Breakpoint, "-", n=2)[,2], 
+         
+         chrA=str_split_fixed(Breakpoint_GeneA, ":", n=2)[,1], 
+         chrB=str_split_fixed(Breakpoint_GeneB, ":", n=2)[,1], 
+        
+         bpA=as.numeric(str_split_fixed(Breakpoint_GeneA, ":", n=2)[,2]), 
+         bpB=as.numeric(str_split_fixed(Breakpoint_GeneB, ":", n=2)[,2])) %>%
+  
+  mutate(USI=str_split_fixed(PATIENT_ID, "\\.", n=3)[,1]) %>%
+  mutate(Type=ifelse(chrA == chrB, "intrachromosomal", "interchromosomal")) %>% 
+  mutate(Size=ifelse(Type=="intrachromosomal", abs(bpA-bpB), NA)) %>%
+  
+  select(USI,PATIENT_ID, probes,
+         Type,FusionName, GeneA, GeneB,
+         Hit.Count,
+         FusionExons,
+         Breakpoint,
+         Breakpoint_GeneA,
+         Breakpoint_GeneB,
+         Size,
+         FusionTranscript,
+         Fusion.Detected.K_Mungall) %>%
+  arrange(PATIENT_ID) 
+
+head(fusion.fmt)
+dim(fusion.fmt)
+```
+
+```{r}
+table(fusion.fmt$Type)
+length(unique(fusion.fmt$PATIENT_ID))
+```
+
+
+```{r}
+# write.csv(fusion.fmt,"TARGET_AML_1031_Fusions_batch123_Formated_09.14.2018.csv", row.names = FALSE)
+```
+
+
+#Fusions in Normal BM
+
+
+```{r}
+Fusions.NBM <- fusion.fmt %>%
+  filter(grepl("^BM|^RO", USI)) %>%
+  filter(!Hit.Count==0)
+
+# dim(Fusions.NBM) #85
+head(Fusions.NBM)
+```
+
+```{r}
+as.data.frame(table(Fusions.NBM$FusionName)) %>%
+  arrange(desc(Freq))
+```
+
+
+#Filter the false positive fusions based on NBM 
+
+```{r}
+filterFusions <- function(Fusion, breakpoint, hit.count, df2.Fusion,df2.Breakpoints){
+  
+  fus <- paste(Fusion,breakpoint,sep=" ")
+  fus2 <- paste(df2.Fusion, df2.Breakpoints, sep=" ")
+  
+  if ( any(fus %in% fus2 | hit.count == 0) ){
+    res <- 1 #these fusions will be filtered out. 
+  }else{
+    res <- 0 #these one will not. 
+  }
+  
+  return(res)
+}
+```
+
+```{r }
+fusion.fmt.filter <- fusion.fmt %>%
+  
+  rowwise() %>%
+  mutate(FailedFilterFusions=filterFusions(FusionName, Breakpoint,Hit.Count,
+                                           Fusions.NBM$FusionName,Fusions.NBM$Breakpoint)) %>%
+  ungroup() %>%
+  
+  #Must group by library ID bc there are flow sorted samples with 3 fractions.   
+  group_by(PATIENT_ID) %>%
+  mutate(AllFail=ifelse(sum(FailedFilterFusions) == n(),"Yes","No")) %>%
+  mutate(Fusion.Detected.K_Mungall=case_when(AllFail == "Yes" & sum(Hit.Count) != 0 ~ "NonePassedFilter",
+                                             AllFail == "Yes" & sum(Hit.Count) == 0 ~ "NoneDetected",
+                                             TRUE ~ Fusion.Detected.K_Mungall)) %>%
+  
+  mutate(Fusion.Detected.K_Mungall=ifelse(AllFail == "Yes",
+                                           "NonePassedFilter",Fusion.Detected.K_Mungall)) %>%
+  ungroup()  %>%
+
+  filter(AllFail == "Yes" | FailedFilterFusions == 0) %>%
+
+  rowwise() %>%
+  #change all to characters so that numeric cols can be filled below with a charcter string.
+  mutate_all(funs(as.character(.))) %>%
+  mutate_at(vars(3:NCOL(.)),
+            funs(case_when(Fusion.Detected.K_Mungall == "NonePassedFilter" ~ "NonePassedFilter",
+                           Fusion.Detected.K_Mungall == "NoneDetected" ~ "NoneDetected",
+                           TRUE ~ .))) %>%
+
+  #restore numberic class to hit count and size.
+  mutate_at(vars(c("Hit.Count","Size")),
+            funs(ifelse(Fusion.Detected.K_Mungall == "NonePassedFilter", NA,  as.numeric(.)))) %>%
+  unique(.) #remove the duplicate entries with "nonePassedFilter" but everyhting else is identical.
+
+
+head(fusion.fmt.filter)
+dim(fusion.fmt.filter) #1895 by  17
+```
+
+NonePassedFilter corresponds to patients who had some fusion(s) detected, but were all found in NBMs 
+NoneDetected corresponds to patients who had all zeros in the Hit.Counts  (no supporting evidence for any fusion)
+
+
+```{r}
+length(unique(fusion.fmt.filter$PATIENT_ID)) #1114
+table(fusion.fmt.filter$Fusion.Detected.K_Mungall)
+```
+
+
+```{r}
+# write.csv(fusion.fmt.filter, "TARGET_AML_1031_Fusions_Formatted_FilteredForNBM_9.14.18.csv", row.names = FALSE)
+```
+
+
+
+#Define the Primary Fusions/Breakpoints per patient 
+
+For each patient and fusion (geneA-geneB) partner, want to select one that has the highest hit count. 
+So that each patient 
+
+```{r}
+fusionCategory <- function(geneA,geneB){
+  
+  if(grepl("None", ignore.case = TRUE, geneA)){
+    return("NonePassedFilter")
+  }
+  
+  fus <- c(geneA,geneB)
+  #order alphabetically, so that the category includes  reciprocal fusions
+  fus <- paste(fus[order(fus)], collapse = "-") 
+}
+```
+
+
+```{r}
+getPrimaryFusion <- function(USI,hit.count){
+  # hit.count is the column with the # of hits (reads) for each of the fusions 
+  if (all(is.na(hit.count))){
+    res <- NA
+    return(res)
+  }
+
+  #Create boolean vectors for each type of evidence supporting the "primary" fusion. 
+  USI <- unique(USI)
+  counts <-  hit.count == max(hit.count)
+  
+  #select that one with the highest reads
+    temp <- data.frame(hit.count=hit.count) %>%
+      mutate(rank=rank(hit.count, ties.method = "first")) %>%
+      mutate(primary=ifelse(rank==max(rank), "primary", "alternate"))
+        
+    # break ties if there are multiple fusions with same #s of supporting reads.
+    if (sum(temp$primary == "primary") > 1){
+      #will break dplyr
+          return(temp)
+    }
+
+  res <- temp$primary
+  
+  return(res)
+}
+```
+
+
+```{r}
+#Paste alternate breakpoints using a semicolon seperator
+collapseFusions <- function(breakpoint){
+  paste(unique(breakpoint), collapse = "; ")
+}
+
+#Function to full the NAs with empty string
+fillNA <- function(x,USI){
+  
+  USI <- unique(USI)
+  x <- x %>% 
+    .[!is.na(.)] %>% 
+    unique()
+  
+  if(length(x) < 1){
+    x <- ""
+  }
+
+  return(x)
+}
+```
+
+
+```{r warning=FALSE}
+fusion.fmt.primary <- fusion.fmt.filter %>% 
+  
+  rowwise() %>%
+  #Fusion category is to encompass both reciprocal fusions under 1 type/name. 
+  mutate(Fusion.Category=fusionCategory(GeneA,GeneB)) %>% 
+  ungroup() %>%
+
+  group_by(PATIENT_ID, Fusion.Category) %>%
+  mutate(Primary.Fusion=getPrimaryFusion(USI=PATIENT_ID,hit.count = Hit.Count)) %>%
+  arrange(PATIENT_ID,Fusion.Category) %>%
+  
+  group_by(PATIENT_ID, Fusion.Category, Primary.Fusion) %>%
+  mutate(Alternate.Breakpoints=ifelse(Primary.Fusion=="alternate",
+                                      collapseFusions(breakpoint = Breakpoint), NA)) %>%
+  ungroup() %>%
+
+
+  group_by(PATIENT_ID, Fusion.Category) %>%
+  mutate(Alternate.Breakpoints=fillNA(Alternate.Breakpoints, USI=USI)) %>%
+  mutate(Alternate.Breakpoints=ifelse(Breakpoint==Alternate.Breakpoints,"",Alternate.Breakpoints)) %>%
+  ungroup() %>%
+
+  filter(grepl("primary", Primary.Fusion) | grepl("NonePassedFilter|NoneDetected", FusionName)) %>%
+  left_join(., select(CDE.1031, USI, Reg.), by="USI") %>%
+  
+  mutate(Group=case_when(
+    grepl("BM[0-9]|RO[0-9]", PATIENT_ID) ~ "NBM",
+    grepl("Kas|MV4", PATIENT_ID) ~ "CellLine",
+    TRUE ~ "AML")) %>%
+  arrange(Group,PATIENT_ID,Fusion.Category) %>%
+
+  select(USI, 
+         PATIENT_ID, Reg.,
+         Group, Type,
+         FusionName,Fusion.Category,
+         Hit.Count,GeneA,GeneB,
+         Breakpoint,Breakpoint_GeneA, Breakpoint_GeneB,
+         Alternate.Breakpoints,
+         FusionExons,
+         Size,
+         FusionTranscript,
+         probes,
+         Fusion.Detected.K_Mungall) %>%
+  ungroup()
+
+
+dim(fusion.fmt.primary) #1399   18  (removed an extra 496 lines)
+head(fusion.fmt.primary)
+```
+
+```{r}
+table(fusion.fmt.primary$Type)
+table(fusion.fmt.primary$Group)
+```
+
+
+
+#Merge the Tally with Clinical Data Elements
+
+
+```{r}
+fusion.fmt.primary <- fusion.fmt.primary %>%
+  left_join(., select(CDE.1031, USI, Age.Yrs, ISCN), by="USI") %>%
+  select(USI, PATIENT_ID, Reg., Age.Yrs, ISCN, everything())
+
+dim(fusion.fmt.primary)
+head(fusion.fmt.primary)
+```
+
+
+```{r}
+# write.csv(fusion.fmt.primary,
+          # "TARGET_AML_1031_Fusions_Formatted_FilteredForNBM_Primary_9.14.18.csv", row.names = FALSE)
+```
+
+
+#Split into Intra/Inter Chromosomal Fusions 
+
+```{r}
+inter <- fusion.fmt.primary %>% 
+  filter(grepl("interchromosomal|NoneDetected|NonePassedFilter", Type)) %>%
+  select(-Fusion.Category)
+
+head(inter)
+dim(inter) #1105   19
+# write.csv(inter,
+          # "TARGET_AML_1031_Fusions_Formatted_Interchromosomal_FilteredForNBM_Primary_9.14.18.csv", row.names = FALSE)
+```
+
+
+```{r}
+intra <- fusion.fmt.primary %>% 
+  filter(grepl("intrachromosomal|NoneDetected|NonePassedFilter", Type)) %>%
+  select(-Fusion.Category)
+
+head(intra)
+dim(intra) #633  by 19
+# write.csv(intra,"TARGET_AML_1031_Fusions_Formatted_Intrachromosomal_FilteredForNBM_Primary_9.14.18.csv", row.names = FALSE)
+```
+
+
+#Create A column for all Fusions Found, One Patient per Row
+
+
+```{r}
+fusions.all <- fusion.fmt.primary %>%
+  #Create from Fusion.Category to include all the reciprocals. 
+  mutate(Fusion.Category=ifelse(grepl("None", Fusion.Category), "",Fusion.Category)) %>%
+  group_by(Type, PATIENT_ID) %>%
+  
+  mutate(All.Fusions.Found=collapseRows(Fusion.Category, uniq = TRUE)) %>%
+  select(PATIENT_ID,  Group, All.Fusions.Found, Type) %>%
+  unique(.) %>%
+  
+  spread(Type, All.Fusions.Found) %>%
+  select(-NonePassedFilter)  %>%
+  mutate_at(vars(interchromosomal:intrachromosomal),
+            funs(case_when( all(is.na(.) & Group == "NBM") ~ "NonePassedFilter", 
+                            all(is.na(.) & Group != "NBM") ~ "NoneDetected",
+                            TRUE ~ . )))
+
+head(fusions.all)
+```
+
+
+```{r}
+dim(fusions.all) # 1114    4
+# write.csv(fusions.all, "TARGET_AML_1031_Fusions_Formatted_Intrachromosomal_FilteredForNBM_Primary_ByType_9.14.18.csv")
+```
+
+
+#Tally the Fusions 
+
+```{r}
+fusionNames <- fusion.fmt.primary$Fusion.Category  %>%
+   .[. != "NonePassedFilter"] %>%
+  unique()
+
+head(fusionNames)
+length(fusionNames) #64
+```
+
+
+```{r}
+tally_fusions <- function(fusions,col){
+  #fusions is a character vector of all fusion names (geneA-geneB) format
+  #col is the column with the fusions, one patient per row. col would have the format (geneA-geneB; geneC-geneD) for all patients. 
+  df <-   lapply(fusions, function(x) grepl(x, unlist(col))) %>%
+    set_names(fusions) %>%
+    as.data.frame() %>%
+    summarise_all(., funs(Yes=sum(.),
+                          No=sum(!.),
+                          Percent=round(sum(.)/NROW(.)*100, digits = 2))) %>%
+    gather(Fusion,Value) %>%
+    separate(Fusion, into=c("Fusion","Stat"),sep = "_") %>%
+    spread(Stat, Value) %>%
+    separate(Fusion, into = c("GeneA","GeneB"),remove = FALSE) %>%
+    select(Fusion.Category=Fusion,GeneA, GeneB, No,Yes,Percent) %>%
+    filter(!Yes==0) %>%
+    arrange(desc(Percent)) 
+  
+  return(df)
+  
+}
+```
+
+
+```{r}
+inter.tally <- tally_fusions(fusions=fusionNames, col= fusions.all$interchromosomal)
+  
+
+head(inter.tally)
+dim(inter.tally)
+# write.csv(inter.tally, "TARGET_AML_1031_Fusions_Formatted_FilteredForNBM_Primary_Interchom_Freq.csv", row.names = FALSE)
+```
+
+
+```{r}
+intra.tally <- tally_fusions(fusions=fusionNames, col= fusions.all$intrachromosomal)
+  
+
+head(intra.tally)
+dim(intra.tally)
+# write.csv(intra.tally, "TARGET_AML_1031_Fusions_Formatted_FilteredForNBM_Primary_Intrachom_Freq.csv", row.names = FALSE)
+```
+
+

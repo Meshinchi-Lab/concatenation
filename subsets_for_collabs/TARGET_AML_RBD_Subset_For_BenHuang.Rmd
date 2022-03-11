@@ -1,0 +1,176 @@
+---
+title: "Diagnositic and Remission Samples"
+author: "Jenny Smith"
+date: "10/8/21"
+output: html_document
+---
+
+# Set-up 
+
+```{r setup, cache = FALSE, include = FALSE}
+require(knitr)
+knitr::opts_knit$set(root.dir = file.path(SCRATCH,"jlsmith3"))
+```
+
+```{r}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),
+                      tidy=TRUE,
+                      fig.align='center',
+                      fig.width = 10, fig.height = 10)
+node=Sys.info()[["nodename"]]
+if(!grepl("local", node)){
+  print(node)
+  options(bitmapType = 'cairo')
+  grDevices::X11.options(type='cairo')
+}
+
+options(stringsAsFactors = FALSE)
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+
+library(ggplot2)
+library(gridExtra)
+library(patchwork)
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(REDCapR)
+
+library(DeGSEA)
+library(edgeR)
+
+getwd()
+```
+
+
+# Read in the counts
+
+```{r}
+genome <- "GRCh38"
+```
+
+## GRCh38 
+
+```{r}
+current_files <- dir(file.path(PROJHOME, "0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/"))
+# current_files
+    
+
+if(genome=="GRCh38"){
+    cts_grch38_file <- grep("_RBD_.+scaledTPM_counts.RDS", current_files, value=TRUE)
+    cts_grch38 <- readRDS(file.path(PROJHOME, "0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/",cts_grch38_file))
+    cts_grch38_ids <- cts_grch38[,grep("gene_id|gene_name", colnames(cts_grch38))]
+    
+    cts_grch38 <- as.data.frame(cts_grch38)
+    rownames(cts_grch38) <-  cts_grch38_ids$gene_name
+    cts_grch38 <- cts_grch38[,-grep("gene_id|gene_name", colnames(cts_grch38))]
+    
+    # head(cts_grch38[,1:5])
+    dim(cts_grch38) #58263  3021 
+    
+    ### TPM
+    TPM_grch38_file <- grep("_RBD_.+Abundance_TPM", current_files, value=TRUE)
+    TPM_grch38 <- readRDS(file.path(PROJHOME, "0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/",TPM_grch38_file))
+    TPM_grch38_ids <- TPM_grch38[,grep("gene_id|gene_name", colnames(TPM_grch38))]
+    
+    TPM_grch38 <- as.data.frame(TPM_grch38)
+    rownames(TPM_grch38) <-  TPM_grch38_ids$gene_id
+    TPM_grch38 <- TPM_grch38[,-grep("gene_id|gene_name", colnames(TPM_grch38))]
+    
+    
+    # head(TPM_grch38)
+    dim(TPM_grch38) #58263  3021
+}
+```
+
+
+```{r}
+sample_info <- read.csv(file.path(TARGET, "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_08.12.21.csv"))  %>% 
+  filter(!USI %in% inelig)
+
+dim(sample_info)
+```
+
+```{r}
+#Also found in the mRNAseq/metadata directory
+EOI.timepoint <- openxlsx::read.xlsx("TARGET_AML_Remission_Refractory_EOI_Sample_Renaming_Merged_Manifest_withLibraryIDs_09.15.2021.xlsx") %>% 
+  mutate_at(vars(`Final.Barcode.(All)`), ~gsub("O1R","01R", .)) %>%
+  mutate(Sample=gsub("-","\\.", `Final.Barcode.(All)`))
+
+
+head(EOI.timepoint)
+# dim(EOI.timepoint) #725  14
+# View(EOI.timepoint)
+```
+
+
+
+
+# Select Samples
+
+```{r}
+samples <- sample_info %>% 
+  filter(grepl("diagnostic|remission|NBM|CD34_PB", Time_point)) %>% 
+  filter(grepl("^AML$|NBM|CD34_PB", Group)) %>% 
+  arrange(Sample) %>% 
+  filter(Sample %in% colnames(cts_grch38)) %>% 
+  left_join(., filter(EOI.timepoint, grepl("EOI", Timepoint)) %>% 
+                  select(Sample, "Remission_Timepoint"=Timepoint),
+            by="Sample")
+  
+
+# samples
+dim(samples) #1951
+# write.csv(samples,"TARGET_AML_diagnostic_remission_and_normal_controls_sample_manifest.cvs", row.names = FALSE)
+```
+
+```{r}
+# samples$Sample[!samples$Sample %in% colnames(cts_grch38)] #Missing BAM files for these samples 
+
+# table(samples$Time_point, samples$Group)
+# table(samples$Time_point, samples$AML_Subtype)
+```
+
+```{r}
+# samples %>% 
+#   filter(Time_point=="remission") %>% 
+#   View()
+```
+
+# Subset the Counts 
+
+```{r}
+# setdiff(cts_grch38_ids$gene_id, TPM_grch38_ids$gene_id)
+```
+
+```{r}
+cts_subset <- cts_grch38[,samples$Sample]
+
+dim(cts_subset)
+head(cts_subset[,1:5])
+
+# write.csv(cts_subset, "TARGET_AML_diagnostic_remission_and_normal_controls_Kallisto_GRCh38_counts.csv", row.names = TRUE)
+```
+
+```{r}
+TPM_subset <- TPM_grch38[,samples$Sample]
+
+dim(TPM_subset)
+head(TPM_subset[,1:5])
+
+# write.csv(TPM_subset, "TARGET_AML_diagnostic_remission_and_normal_controls_Kallisto_GRCh38_TPM.csv")
+```
+
+
+
+# Session Information
+
+```{r}
+sessionInfo()
+```
+

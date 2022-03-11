@@ -1,0 +1,295 @@
+---
+title: "Concatenate Ribodepleted RNAseq counts from Kallisto Quant from PacBio Novels Fasta Reference"
+author: "Jenny Smith"
+date: "June 13, 2019"
+output: html_document
+---
+
+#Set-up
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 8, fig.width = 10)
+knitr::opts_knit$set(root.dir = file.path(SCRATCH,'jlsmith3/SMRTseq/'))
+options(stringsAsFactors = FALSE)
+```
+
+```{r}
+library(tximport)# lib.loc = "/home/jlsmith3/R/x86_64-pc-linux-gnu-library/3.5")
+library(rhdf5)
+library(readr)
+
+library(edgeR)
+library(limma)
+library(RColorBrewer)
+library(stringr)
+library(dplyr)
+library(tibble)
+library(magrittr)
+
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/R/in_progress/ggplot_Themes_Function.r")
+source("~/scripts/conversion_scripts/GTF_to_IDmap_Function.r")
+```
+
+
+
+NOTE: 
+
+The working directory is kallisto on scratch/, whcih is temporary storage and will be deleted in 90 days. The way to reproduce this code is to re-download files from AWS s3 bucket. 
+
+Will add code-snippet here. Possible to do this through R client as well, but I did it using aws command line interface. 
+
+
+```{bash eval=FALSE}
+ml awscli 
+BUCKET="s3://fh-pi-meshinchi-s"
+Res="/fh/scratch/delete90/meshinchi_s/jlsmith3/kallisto/relapse_results/relapse_kallisto.txt"
+
+#loop to copy all h5 abundance files to the current working dsirectory
+for path in $(cat "$Res" | head ); 
+do IFS='/' read -ra SEGS <<< "$path";    
+  samp=${SEGS[2]}_${SEGS[3]}; 
+  echo $samp
+  aws s3 cp $BUCKET/$path $PWD/relapse_results/$samp; 
+done 
+
+
+#bash code for moving the abundance.h5 files into individual directories.
+for file in $(ls -1 relapse_results/*.h5) ;
+do samp=${file/_abundance.h5/};
+  mkdir -p $samp ; 
+  mv $file $samp/abundance.h5 ; 
+done
+```
+
+
+The tximport package will not interpret the .h5 files as hdf5 format when named anything other than abundance.h5, which is quirky to say the least. 
+
+So I used my download script to rename the abundance.h5 files with thier sample ID and then had to create a nested directory structure that kallisto output uses natively. This of course works on unix systems, but AWS S3 buckets do not have directories, so each URL is for a single object (file). So downloading from s3 to unix directory loses all structure. 
+
+#Read in the manifest file
+
+```{r}
+manifest <- read.csv("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/SequencingDataMatrix/TARGET_AML_0531_1031_miRNAseq_Ribodepletion_mRNAseq_Manifest_v5.csv")
+
+head(manifest)
+dim(manifest)
+```
+
+
+
+# Define Kallisto quant files 
+
+```{r}
+path <- paste0(getwd(), "/kallisto_NIC/results")
+
+hdf5 <- dir(path=path, pattern = "*.h5",recursive = TRUE, full.names = TRUE)
+
+head(hdf5)
+length(hdf5) #1568
+```
+
+```{r}
+patient.IDs <- data.frame(filepath=path,
+                          filename=hdf5) %>% 
+  
+  mutate(TARGET.Barcode=str_split_fixed(filename, pattern = "[/_]", n=14)[,12]) %>%
+  mutate(Lib_Prep="RBS") %>%
+  mutate(Final_Colname=ifelse(Lib_Prep=="RBS", TARGET.Barcode, paste(TARGET.Barcode, Lib_Prep, sep="_"))) %>% 
+  
+  #filter PATGIG and PATISD replicates- they were not processed on S3/Batch.
+  left_join(., filter(manifest, !(grepl("PATGIG|PATISD", USI) & grepl("Replicate", Replicate))),  
+            by=c("Final_Colname"="PATIENT_ID_Original")) %>%
+  
+  mutate_at(vars(Final_Colname), 
+            funs(case_when(
+                          grepl("RBS", Lib_Prep) ~  gsub("_none|_Original", "", paste(Final_Patient_ID, Lib_Prep, Replicate, sep="_")), 
+                          TRUE ~ . ))) %>% 
+  
+  arrange(Final_Colname) %>% 
+  dplyr::select(filepath,filename, PATIENT_ID_Original=TARGET.Barcode, Lib_Prep, Final_Colname) 
+ 
+
+head(patient.IDs)
+dim(patient.IDs)
+
+# write.csv(patient.IDs, "Kallisto_Quant_Gencode_v29_PacBio_NIC_Sample_IDmap.csv",row.names = FALSE)
+```
+
+```{r}
+table(patient.IDs$Lib_Prep)
+```
+
+
+#Create a Gene to Transcript ID Map 
+
+https://www.gencodegenes.org/human/stats.html
+
+
+```{r}
+gtf <- read.delim("/fh/fast/meshinchi_s/workingDir/TARGET/Reference_Data/GRCh38/gtf/gencode.v29.annotation.gtf", 
+                  header = FALSE, sep = "\t",
+                  quote = "\"", dec = ".", fill = TRUE, comment.char = "#")
+
+
+# head(gtf)
+dim(gtf) # 2,742,017 by 9
+```
+
+```{r}
+SQANTI <- read.csv("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2019.01.07_SMRT_Isoseq/TARGET_AML_PacBio_Isoseq3_SQANTI_classification.csv")
+dim(SQANTI)
+head(SQANTI)
+```
+
+```{bash}
+cat "gencode.v29_PacBio.NIC.IL3RA.transcripts.fa" | grep -E "^>" | grep -E -v "^>ENST[0-9]" | sed -E 's/^>//' > NIC_IDs.txt
+
+wc -l NIC_IDs.txt #4894 NIC_IDs.txt
+```
+
+```{r}
+NIC <- read.delim("NIC_IDs.txt", sep="\t", header=FALSE) %>% 
+  left_join(., SQANTI, 
+            by=c("V1"="isoform")) %>% 
+  select(V1,structural_category,associated_gene, associated_transcript) %>% 
+  unique() %>% 
+  select(transcript_id=V1, gene_name=associated_gene, everything())
+
+dim(NIC) #4894
+head(NIC)
+sum(duplicated(NIC$transcript_id))
+```
+
+```{r}
+IDmap <- getIDmap(gtf)
+
+head(IDmap)
+dim(IDmap) #206,694 transcripts.  same # transcripts listed online in the stats page of gencode v29
+```
+
+```{r}
+IDmap <- IDmap %>% 
+  #add the repbase transposable elements 
+  add_row(transcript_id=NIC$transcript_id, 
+          gene_name=NIC$gene_name,
+          transcript_name=NIC$transcript_id, 
+          gene_type="protein_coding", 
+          transcript_type="PacBio Novel In Catalog") %>% 
+  
+  arrange(gene_name) %>% 
+
+  group_by(gene_name) %>% 
+  mutate(Number_Transcripts=n(),
+         gene_id=ifelse(is.na(gene_id), 
+                     unique(gene_id[!is.na(gene_id)])[1], #not ideal. just pick first gene. 
+                     gene_id)) %>% 
+  ungroup()
+  
+ 
+
+
+
+dim(IDmap) # 211588 
+head(IDmap)
+tail(IDmap)
+
+# write.csv(IDmap, "gencode.v29_PacBio_AML_NIC_Trancript_Gene_IDmap.csv", row.names = FALSE)
+```
+
+```{r}
+# filter(IDmap, gene_name %in% c("IDI1","VPS37B","SRSF5","PDCD4","IMPDH2","HLA-E"))
+```
+
+
+#TXimport with the HDF5 files
+
+
+https://wurmlab.github.io/genomicscourse/2016-SIB/practicals/rnaseq/TP2
+For this purpose, they introduced the "scaledTPM" values, which are obtained by summing the transcript-level TPMs by gene, and multiplying them with the total library size in millions. 
+
+ScaledTPM values are artificial values, transforming underlying abundance measures to the scale of read counts. This allows to incorporate the information provided by the sequencing depth, and work with RNA-seq differential expression tools that were developed to use read counts. 
+
+
+countsFromAbundance:
+character, either "no" (default), "scaledTPM", or "lengthScaledTPM", for whether to generate estimated counts using abundance estimates scaled up to library size (scaledTPM) or additionally scaled using the average transcript length over samples and the library size (lengthScaledTPM). if using scaledTPM or lengthScaledTPM, then the counts are no longer correlated with average transcript length, and so the length offset matrix should not be used.
+
+```{r}
+library(rslurm)
+```
+
+```{r}
+files <-patient.IDs$filename %>% 
+  set_names(patient.IDs$Final_Colname)
+
+tx2gene <- dplyr::select(IDmap, transcript_id, gene_id)
+
+sopt <- list(nodes='1', 'cpus-per-task'='16',
+             'partition'='largenode', 'mem'='62G',
+             'time' = '24:00:00', 'mail-type'='END,FAIL',
+             'mail-user'='jlsmith3@fredhutch.org') 
+
+```
+
+```{r}
+txi.txLevel.job <- slurm_call(f=tximport,
+                     jobname = "tximport_Tx",
+                     params =  list(files = files,
+                                    type="kallisto", 
+                                    tx2gene = tx2gene, 
+                                    txIn = TRUE,
+                                    txOut = TRUE,
+                                    ignoreAfterBar = TRUE, 
+                                    dropInfReps= TRUE,
+                                    countsFromAbundance = "scaledTPM"),
+                     add_objects = c("files","tx2gene"),
+                     slurm_options=sopt,
+                     submit = TRUE) #Submitted batch job  33969961
+
+
+# str(txi.txLevel.job) 
+```
+
+```{r}
+print_job_status(txi.txLevel.job)
+```
+
+
+## read in the results of tximport 
+
+```{r}
+txi.transcriptLevel <- readRDS("_rslurm_tximport_Tx/results_0.RDS") 
+txi.transcriptLevel$countsFromAbundance
+```
+
+```{r}
+# txi.transcriptLevel <- 
+new_rownames <- str_split_fixed(rownames(txi.transcriptLevel$abundance), pattern = "\\|", n = 2)[,1] 
+txi.transcriptLevel[c(1:3)] <- lapply(txi.transcriptLevel[c(1:3)],set_rownames, value=new_rownames)
+```
+
+```{r}
+lapply(txi.transcriptLevel[c(1:3)], function(x) head(x[,1:5]))
+lapply(txi.transcriptLevel[c(1:3)], function(x) tail(x[,1:5]))
+
+sapply(txi.transcriptLevel[c(1:3)], dim)
+```
+
+```{r}
+saveRDS(txi.transcriptLevel$abundance,
+          "TARGET_AML_0531_1031_Kallisto_Quant_PacBio_TranscriptLevel_Abundance_TPM.RDS")
+
+saveRDS(txi.transcriptLevel$counts,
+          "TARGET_AML_0531_1031_Kallisto_Quant_PacBio_TranscriptLevel_scaledTPM_counts.RDS")
+```
+
+
+
+
+
+#SessionInfo
+
+```{r}
+sessionInfo()
+```
+

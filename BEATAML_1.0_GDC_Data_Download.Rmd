@@ -1,0 +1,541 @@
+---
+title: 'GDC data download for BEAT AML Cohort'
+author: "Jenny Smith"
+date: "June 21,  2020"
+output: html_document
+---
+
+
+#Set-up 
+
+```{r setup}
+library(knitr)
+
+# dir.create(file.path(BEATAML,"RNA/mRNAseq/analysis/2020.06.20_GDC_Download"))
+knitr::opts_knit$set(root.dir = file.path(BEATAML,"RNA/mRNAseq/analysis/2020.06.20_GDC_Download"))
+```
+
+```{r}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height=5, fig.width=8, dpi = 600)
+options(stringsAsFactors = FALSE)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+library(tidyr)
+getwd()
+```
+
+
+#References
+
+https://bioconductor.org/packages/release/bioc/vignettes/GenomicDataCommons/inst/doc/overview.html#quickstart
+http://bioconductor.org/packages/release/bioc/vignettes/TCGAutils/inst/doc/TCGAutils.html
+
+http://bioconductor.org/packages/release/bioc/vignettes/TCGAbiolinks/inst/doc/index.html
+http://bioconductor.org/packages/release/bioc/vignettes/TCGAbiolinks/inst/doc/query.html#get_manifest_file
+
+
+
+
+#Installation  
+
+```{r}
+# BiocManager::install("TCGAbiolinks") #as back up 
+# library(TCGAbiolinks)
+```
+
+```{r}
+# BiocManager::install('GenomicDataCommons')
+library(GenomicDataCommons)
+```
+
+```{r}
+GenomicDataCommons::status()
+```
+
+```{r}
+stopifnot(GenomicDataCommons::status()$status=="OK")
+```
+
+
+
+#Read in the Clinical Data 
+
+```{r}
+beat_aml_cde <- read.csv(file.path(BEATAML,"Clinical/BEAT_AML_Clinical_Data_Elements_8.16.20.csv")) %>% 
+  rename_at(vars(consensus_sex:ZRSR2), ~paste0(., "_SuppTable")) %>%
+  arrange(desc(LabId))
+
+
+# dim(beat_aml_cde) #672 159
+head(beat_aml_cde)
+# grep("vital|surv", colnames(beat_aml_cde), value=T, ignore.case = T) # "vitalStatus"     "overallSurvival"
+```
+
+```{r}
+sample_info <- read.csv(file.path(BEATAML,"Clinical/BEAT_AML_All_sample_data_VIZOME_8.16.20.csv"), skip = 3) %>%
+  rename_at(vars(AnyGeneTrailsGene:WHO_Fusion), ~paste0(., "_VIZOME"))
+
+# table(beat_aml_cde$LabId %in% sample_info$LLS_SampleID) #includes 669 samples from supp tables. Why missing 3?
+
+sample_info <- sample_info %>% 
+  left_join(., beat_aml_cde, 
+            by=c("LLS_SampleID"="LabId")) %>% 
+  dplyr::select(PatientID, PatientId, matches("^LLS"),SampleID, 
+                matches("vital|surv"), 
+                everything()) %>%
+  arrange(desc(LLS_SampleID))
+
+
+head(sample_info)
+# dim(sample_info) #702 208
+# grep("vital|surv", colnames(sample_info), value=T, ignore.case = T) #"OverallSurvival" "VitalStatus"
+```
+
+```{r}
+manifest <- read.csv("BEAT_AML_STAR-aligner_GCD_Data_Manifest_with_CDE.csv")
+
+head(manifest)
+table(manifest$WHO_Fusion_VIZOME)
+
+# table(manifest$Other.Cytogenetics_SuppTable) #16 CBFB-MYH11
+# grep("CBFB|inv.16", manifest$Other.Cytogenetics_SuppTable, value=T) %>% 
+#   grep("RUNX1",., invert=T, value=T) #16 CBFB-MYH11 ? seems low
+
+grep("inv.16.", manifest$Karyotype_SuppTable, value=T) #maybe 22 by karyo
+
+# grep("NUP98", manifest$Other.Cytogenetics_SuppTable, value=T)
+# manifest$KDM6A_SuppTable
+```
+
+```{r}
+# table(is.na(manifest$Karyotype_SuppTable)) #474 ISCN
+# grep("t\\(5;11.", manifest$Karyotype_SuppTable, value=TRUE) #NUP98-NSD1 0
+# grep("t\\(11;12",  manifest$Karyotype_SuppTable, value=TRUE) #NUP98-KDM5A 0 
+```
+
+# Query GDC for Gene Expression Data and Clinical Data
+
+```{r}
+# View(available_fields('files'))
+# View(available_fields('annotations'))
+
+
+# grep('project',available_fields('files'),value=TRUE) 
+# grep('type',available_fields('files'),value=TRUE) 
+# grep('cases.samples.submitter_id',available_fields('files'), value=TRUE)
+
+# grep('genome|ref',available_fields('cases'), value=TRUE, ignore.case = T)
+# grep('genome|ref',available_fields('files'), value=TRUE, ignore.case = T)
+# grep('genome|ref',available_fields('projects'), value=TRUE, ignore.case = T)
+# grep('genome|ref',available_fields('annotations'), value=TRUE, ignore.case = T)
+```
+
+```{r}
+#so I used some selected fields, such as project ID, associated_entities (Sample UUIDs),and workflow type, in addition to  the default.
+qfiles <- files(fields=c("cases.project.project_id",
+                         default_fields('files'), 
+                         grep_fields('files',
+                                     "associated_entities"), 
+                         "analysis.analysis_type",
+                         "analysis.workflow_type",
+                         "analysis.workflow_version")) 
+
+qfiles %>% count() # 570,844
+```
+
+```{r}
+#Determine available analysis types and files in BEAT AML cohort
+# available_fields(qfiles)
+temp <- qfiles %>% 
+  filter(~ cases.project.project_id == 'BEATAML1.0-COHORT') 
+
+temp %>% count()
+
+
+temp %>% 
+  facet(c("analysis.workflow_type","data_type")) %>% 
+  aggregations()
+```
+
+
+```{r}
+bam_qfiles <- qfiles %>% 
+  filter(~ cases.project.project_id == 'BEATAML1.0-COHORT' & 
+           analysis.workflow_type == 'STAR 2-Pass Genome' & 
+          type == 'aligned_reads' )
+         
+         # ,type == 'aligned_reads' & 
+         #  cases.project.project_id == "BEATAML1.0-COHORT")
+
+bam_qfiles %>% count()
+# bam_qfiles$legacy
+```
+
+```{r}
+count_qfiles <- qfiles %>%
+  filter(~ cases.project.project_id == "BEATAML1.0-COHORT" & 
+           analysis.workflow_type == 'STAR - Counts' &
+           data_type == 'Gene Expression Quantification')
+
+
+count_qfiles %>% count() 
+```
+
+
+#Create ID Map for Manifest, Clinical, and Expression Files
+
+The "cases" feilds - if used in `results()` contains much of the clinical data elements that are extracted through `gdc_clinical()` function used below. 
+
+## BAMs
+
+```{r}
+#Each entry that is a list is named by the file UUID hash string. 
+res.bams <-  bam_qfiles %>%
+  results_all()
+
+# length(res.bams) #36
+# names(res.bams)
+# lapply(res.bams,head)
+```
+
+```{r}
+#Need to reformat the nested lists and dataframes from the API call
+lists <- which(grepl("list", sapply(res.bams,class)))
+lists
+
+data.frames <- which(grepl("data.frame", sapply(res.bams,class)))
+data.frames
+```
+
+```{r}
+names(res.bams[lists]) #"associated_entities" "cases"   "acl"
+names(res.bams[data.frames]) #"analysis"
+
+reformatted <-list(associated_entities=data.frame(file_UUID=names(res.bams$associated_entities),
+                                                  bind_rows(res.bams$associated_entities)),
+                      cases=data.frame(file_UUID=names(res.bams$cases),
+                                       project_id=sapply(res.bams$cases,
+                                                    function(x) sapply(x, `[[`, 1))),
+                      acl=data.frame(file_UUID=names(res.bams$acl),
+                                      dbGaP_Accession=sapply(res.bams$acl, `[[`, 1)),
+                      analysis=rownames_to_column(res.bams$analysis, "file_UUID")) %>% 
+  bind_cols()
+  
+# class(reformatted)
+# View(reformatted)
+```
+
+
+```{r}
+bams.manifest <- reformatted %>% 
+  bind_cols(., as.data.frame(res.bams[-c(lists,data.frames)])) %>% 
+  dplyr::select(-matches("...[2-9]{1,2}$|...10"))
+
+
+
+head(bams.manifest)
+dim(bams.manifest) #510  40
+# View(bams.manifest)
+
+# write.csv(bams.manifest, "BEAT_AML_STAR-aligner_GCD_Data_Manifest.csv", row.names = FALSE)
+rm(lists,data.frames)
+```
+
+
+```{r}
+bams.manifest <- read.csv("BEAT_AML_STAR-aligner_GCD_Data_Manifest.csv")
+head(bams.manifest)
+```
+
+
+## Counts 
+
+```{r}
+res.counts <- count_qfiles %>% 
+  results_all()
+
+
+names(res.counts)
+```
+
+```{r}
+#Need to reformat the nested lists and dataframes from the API call
+lists <- which(grepl("list", sapply(res.counts,class)))
+lists
+
+data.frames <- which(grepl("data.frame", sapply(res.counts,class)))
+data.frames
+```
+
+```{r}
+names(res.counts[lists]) #"associated_entities" "cases"   "acl"
+names(res.counts[data.frames]) #"analysis"
+
+reformatted.cts <-list(associated_entities=data.frame(file_UUID=names(res.counts$associated_entities),
+                                                  bind_rows(res.counts$associated_entities)),
+                      cases=data.frame(file_UUID=names(res.counts$cases),
+                                       project_id=sapply(res.counts$cases,
+                                                    function(x) sapply(x, `[[`, 1))),
+                      acl=data.frame(file_UUID=names(res.counts$acl),
+                                      dbGaP_Accession=sapply(res.counts$acl, `[[`, 1)),
+                      analysis=rownames_to_column(res.counts$analysis, "file_UUID")) %>% 
+  bind_cols()
+  
+class(reformatted.cts)
+# View(reformatted.cts)
+```
+
+
+```{r}
+cts.manifest <- reformatted.cts %>% 
+  bind_cols(., as.data.frame(res.counts[-c(lists,data.frames)])) %>% 
+  dplyr::select(-matches("...[2-9]{1,2}$|...10"))
+
+
+
+head(cts.manifest)
+dim(cts.manifest) #510  27
+# View(cts.manifest)
+
+# write.csv(cts.manifest, "BEAT_AML_STAR-counts_GCD_Data_Manifest.csv", row.names = FALSE)
+rm(lists,data.frames)
+```
+
+Problem closing connection:  Disk quota exceededError in load(file = path, envir = e) : empty (zero-byte) input file
+
+#Authorization Token
+
+1. login to GDC portal with eRA commons account. This is the same one used to login to dbGaP protected use data. 
+username: JENNYSMITH 
+
+2. click on your user name in the top right corner of the page. A pull down menu will appear
+
+3. Click download token. save this to the appropriate location. tokens expire in 30 days from download. 
+
+```{r}
+Sys.setenv(GDC_TOKEN_FILE=dir(pattern = "token"))
+Sys.getenv("GDC_TOKEN_FILE")
+
+gdc_token()
+```
+
+
+#Create a Download Manifest file
+
+```{r}
+manifest_bams = bam_qfiles %>% manifest()
+
+
+head(manifest_bams)
+dim(manifest_bams) #510
+```
+ 
+```{r}
+manifest_counts = count_qfiles %>% manifest()
+
+
+head(manifest_counts)
+dim(manifest_counts) #510
+```
+
+ 
+
+# Download the files 
+
+```{r}
+#Add the GDC Client to your R options
+options(gdc_client="/home/jlsmith3/scripts/opt/bin/gdc-client")
+gdc_client()
+```
+
+```{r}
+#Set your destination directory (be aware this downloads your current working directory, unless set otherwise)
+
+# dir.create(file.path(SCRATCH,"jlsmith3/BEAT_AML"))
+gdc_set_cache(directory = file.path(SCRATCH,"jlsmith3/BEAT_AML"))
+```
+
+```{r}
+#using future map does not appeart to work for some reason....
+#constant wierd errors that are indecipherable. 
+
+library(furrr)
+plan(multisession)
+
+
+tictoc::tic()
+
+fname <- future_map(.x = ids(manifest_bams),
+                    .f = gdcdata, 
+                    .progress = TRUE,
+                    progress=FALSE, 
+                    access_method = gdc_client(), #Error in gdc_client() : gdc_client not found
+                    use_cached = TRUE,
+                    token = gdc_token())
+
+
+tictoc::toc()
+```
+
+```{r}
+#Slurm approach did not work either...
+library(rslurm)
+
+
+sopt <- list('nodes'='1',
+             'cpus-per-task'='2',
+             'partition'='campus-new', 
+             'time' = '24:00:00', 
+             'mail-type'='END,FAIL',
+             'mail-user'='jlsmith3@fredhutch.org') 
+
+j <- slurm_call(f=gdcdata, 
+                params = list(uuids = ids(manifest_bams), 
+                              progress=TRUE, 
+                              access_method = "client", #Error in gdc_client() : gdc_client not found same thing
+                              use_cached = TRUE,
+                              token = gdc_token()),
+                slurm_options = sopt, 
+                jobname = 'test_gdc', 
+                add_objects = c("manifest_bams"), 
+                submit = TRUE)
+
+# 
+# get_job_status(j)
+```
+
+```{r}
+#download step. very slow. need to imporve this. but rslurm is also not working...
+fnames_bams = gdcdata(uuids = ids(manifest_bams),
+                 progress=TRUE, 
+                 access_method = gdc_client(),
+                 use_cached = TRUE,
+                 token = gdc_token())
+
+head(fnames_bams)
+```
+
+```{r}
+
+#download step
+fnames_cts = gdcdata(ids(manifest_counts),
+                 progress=TRUE, 
+                 access_method = "client",
+                 use_cached = TRUE,
+                 token = gdc_token())
+
+head(fnames_cts)
+```
+
+
+# Rename the BAM files
+
+```{r}
+bams.manifest_update <- bams.manifest %>% 
+  mutate(SampleID=str_split_fixed(entity_submitter_id, pattern = "-", n=2)[,2] %>%
+           gsub("R$","", .)) %>% 
+  left_join(.,  sample_info, by="SampleID") %>% 
+  dplyr::select(PatientID, PatientId, matches("^LLS"),
+                SampleID, entity_submitter_id,
+                file_name,
+                matches("vital|surv"), 
+                everything()) 
+  
+
+# dim(bams.manifest_update) # 510 248
+head(bams.manifest_update) 
+# table(bams.manifest_update$SampleID %in% sample_info$SampleID) #again 3 missing? 507 TRUE
+# write.csv(bams.manifest_update, "BEAT_AML_STAR-aligner_GCD_Data_Manifest_with_CDE.csv",row.names = FALSE)
+```
+
+```{r}
+dplyr::filter(bams.manifest_update, SampleID=="BA2681") #bc97587f97c2c99102990b84e44c0854
+dplyr::filter(bams_to_rename, SampleID=="BA2681")
+```
+
+```{r}
+bam_paths <- dir(file.path(SCRATCH,"jlsmith3/BEAT_AML"), 
+                 pattern = "*.ba[mi]", recursive = T, full.names=TRUE) %>% 
+    grep("logs", ., value=T, invert = T)
+
+
+bams_to_rename <- data.frame(bam_paths=bam_paths) %>%
+  mutate(bams=str_split_fixed(bam_paths, pattern = "\\/", n=9)[,9],
+         file_UUID=str_split_fixed(bam_paths, pattern = "\\/", n=9)[,8]) %>%
+  left_join(., dplyr::select(bams.manifest_update,SampleID,file_UUID...1, md5sum), # 
+              by=c("file_UUID"="file_UUID...1")) %>% 
+  mutate_at(vars(md5sum), ~ifelse(grepl(".bai$", bams), "",.)) %>%
+  mutate(new_filename=paste(SampleID,bams, sep="_")) %>%
+  dplyr::select(file_UUID, SampleID,new_filename, bams, bam_paths, md5sum) 
+
+head(bams_to_rename)
+dim(bams_to_rename) #1020 6
+# write.csv(bams_to_rename, "BEAT_AML_Renamed_BAMs_README.csv", row.names = FALSE)
+# any(is.na(bams_to_rename$SampleID)) #OK
+```
+
+```{r}
+library(furrr)
+```
+
+```{r}
+out_dir <- file.path(SCRATCH,"jlsmith3/BEAT_AML/Renamed_BAMs")
+dir.create(out_dir,recursive = T)
+```
+
+```{r}
+future::plan("multisession")
+tictoc::tic()
+
+renaming_loop <- future_map(1:nrow(bams_to_rename), function(i){
+  out_file <- paste(out_dir, bams_to_rename$new_filename[i], sep="/")
+  print(out_file)
+  file.rename(from = bams_to_rename$bam_paths[i],to = out_file)
+})
+
+tictoc::toc() #30.946 sec elapsed
+
+```
+
+# Check MD5 Sums
+
+```{r}
+#check MD5 sums
+md5sums <- data.frame(bams_to_rename$md5sum, 
+                      bams_to_rename$new_filename) %>%
+  dplyr::filter(bams_to_rename.md5sum != "")
+
+
+# head(md5sums)
+# dim(md5sums)
+```
+
+```{r}
+# write.table(md5sums, paste(out_dir,"md5sum_checks.txt", sep="/"),
+#             sep = "  ",col.names = FALSE, row.names = FALSE, quote = FALSE)
+```
+
+```{bash, eval=FALSE}
+cd "/fh/scratch/delete90/meshinchi_s/jlsmith3/BEAT_AML/Renamed_BAMs"
+md5sum -c md5sum_checks.txt > check_output.txt #All OK
+```
+
+Next, Upload BAM files to S3 for Processing:
+
+
+
+
+
+
+#Session Information 
+
+```{r}
+sessionInfo()
+```
+

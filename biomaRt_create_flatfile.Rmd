@@ -1,0 +1,101 @@
+---
+title: "biomaRt_create_flatfile.Rmd"
+date: "July 28, 2020"
+output: html_document
+---
+
+https://github.com/grimbough/biomaRt/issues/20
+
+due to a confluence of upgrades, R 4.0.* , Ubuntu 18.04, and switching to Rstudio server commercial product, I can no longer query biomaRt regularly. 
+could mayybe due biomaRt have increased demand? but basically useEnsembl() still fail regulary with curl errors, and the query also times out with curl errors. 
+
+At this point, my success rate is like 1/4 for actually create a mart object and then completing a query for a gene list. 
+
+#Set-up
+
+```{r setup, cache = FALSE, include = FALSE}
+require(knitr)
+knitr::opts_knit$set(root.dir = file.path(SCRIPTS))
+```
+
+```{r eval=FALSE}
+library(biomaRt) #lib.loc = lib.path
+
+
+#Having a hella errors when running these in the function itself. 
+mart.37 <- useEnsembl(biomart = "ENSEMBL_MART_ENSEMBL",
+                        dataset = "hsapiens_gene_ensembl",
+                        GRCh = 37)   
+
+# saveRDS(mart.37, file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/biomaRt.GRCh37.RDS"))
+```
+
+```{r eval=FALSE}
+mart.38 <- useEnsembl("ensembl",
+                       mirror = "www",
+                       dataset = "hsapiens_gene_ensembl")
+
+
+# saveRDS(mart.38,file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/biomaRt.GRCh38.RDS"))
+```
+
+```{r eval=FALSE}
+all_gene_ids.37 <- biomaRt::getBM(attributes = c("ensembl_gene_id"),
+                               mart = mart.37) #63677
+all_gene_ids.38 <- biomaRt::getBM(attributes = c("ensembl_gene_id"),
+                               mart = mart.38) #67149
+
+# saveRDS(all_gene_ids.37,file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/GRCh37_all_gene_IDs.RDS"))
+# saveRDS(all_gene_ids.38,file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/GRCh38_all_gene_IDs.RDS"))
+```
+
+```{r}
+mart.37 <- readRDS(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/biomaRt.GRCh37.RDS"))
+
+mart.38 <- readRDS(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/biomaRt.GRCh38.RDS"))
+
+all_gene_ids.37 <- readRDS(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/GRCh37_all_gene_IDs.RDS"))
+
+all_gene_ids.38 <- readRDS(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/GRCh38_all_gene_IDs.RDS"))
+```
+
+#Attributes 
+
+```{r}
+attr.mart <-  c("ensembl_gene_id",
+                  "external_gene_name",
+                  "transcript_count",
+                  "ensembl_transcript_id", 
+                  "ensembl_peptide_id",
+                  "tmhmm", "tmhmm_start", "tmhmm_end") #"transcript_tsl",
+```
+
+
+```{r}
+
+```
+
+#GRCh37 results
+
+```{r}
+res.anno.37 <- getBM(attributes = attr.mart,
+                    filters = "ensembl_gene_id",
+                    values = all_gene_ids.37$ensembl_gene_id[1:50],
+                    mart = mart.37)
+
+res.anno.37
+```
+  
+
+#GRCh38 results  
+```{r}  
+
+res.anno.38 <- getBM(attributes = attr.mart,
+                     filters = "ensembl_gene_id",
+                     values = all_gene_ids.38,
+                     mart = mart.38)
+
+
+# saveRDS(res.anno.38, file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/biomaRt.GRCh38_allGenes.RDS"))
+# saveRDS(res.anno.37, file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/biomaRt.GRCh37_allGenes.RDS"))
+```

@@ -1,0 +1,264 @@
+---
+title: "Concatenate Transcript Level RNA-seq"
+author: "Jenny Smith"
+date: "March 26, 2018"
+output: html_document
+---
+
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 8, fig.width = 10)
+knitr::opts_knit$set(root.dir = '/fh/fast/meshinchi_s/workingDir/TARGET/ALL_TARGET/TARGET_PhaseII/RNA/mRNAseq/analysis/2018.03.26_KLF4_Isoforms/')
+```
+
+
+```{r message=FALSE}
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(stringr)
+library(reshape2)
+library(tidyr)
+getwd()
+```
+
+```{r}
+source("~/scripts/conversion_scripts/Merge_Cat_FixDupIDs_Function.r")
+```
+
+
+#Define Functions to be used. 
+
+```{r}
+#https://stackoverflow.com/questions/32040742/dplyrselect-including-all-other-columns-at-end-of-new-data-frame-or-beginni
+
+addCols <- function(df,id){
+  library(dplyr)
+  
+  df <- as.data.frame(df) %>%
+    mutate(gene_id=id) %>%
+    select(gene_id, everything())
+  
+  return(df)
+}
+```
+
+
+#Identify Files to Be Concatenated
+
+```{r}
+filepath <-  "/fh/fast/meshinchi_s/workingDir/TARGET/ALL_TARGET/TARGET_PhaseII/RNA/mRNAseq/level3/transcript/BCCA_Illumina_data/"
+
+allfiles <- dir(path = filepath, 
+                pattern = ".isoform.quantification.txt") 
+
+head(allfiles)
+```
+
+
+```{r}
+length(allfiles)  #202
+```
+
+
+```{r}
+abundance <- paste(filepath, allfiles, sep="") 
+
+head(abundance)
+```
+
+
+
+
+#Columns Description
+
+transcript
+raw_counts
+median_length_normalized	
+RPKM
+
+#Begin Concatenation 
+
+
+```{r}
+#Pattern to select the Target Barcode
+pattern <- "^.+\\/TARGET.+([A-Z]{6}.+[0-9]R)\\..+"
+```
+
+```{r}
+#Select the column indices 
+selected <- c(1:4)
+```
+
+
+```{r}
+cated <- catExpnData(filenames = abundance, regex = pattern, cols = selected, header = TRUE)
+
+colNames <- c("transcript", "raw_counts", "median_length_normalized", "RPKM")
+names(cated) <- colNames
+length(cated)
+```
+
+
+```{r}
+sapply(cated,dim)
+```
+
+```{r}
+#Function for the TPM conversion. 
+# Based on https://groups.google.com/forum/#!topic/rsem-users/W9RQrZIOzA4
+RPKM_to_TPM <- function(RPKM){
+  #this is per patient, with patietns as columns. 
+  #example use: df.TPM <- apply(df.RPKM, 2, RPKM_to_TPM) #apply to each column. 
+  
+  conversionFactor <- sum(RPKM) / 1E6
+  TPM <- RPKM / conversionFactor
+  return(TPM)
+}
+```
+
+```{r}
+cated[["TPM"]] <- apply(cated$RPKM, 2, RPKM_to_TPM)
+```
+
+
+
+#Check that the Gene Ids are in the Same Order
+
+```{r}
+notIdentical <- which(!apply(cated$transcript,2, identical, y=cated$transcript[,1]))
+
+apply(cated$transcript[,notIdentical],2, function(x) length(intersect(x, y=cated$transcript[,1]))) #all have same length as the dim. 
+all(apply(cated$transcript[,notIdentical],2, complete.cases)) #No NAs
+# setdiff(cated$transcript[,1],cated$transcript[,150])
+```
+
+
+
+#Add columns for the Gene Symbol and Ensembl Symbol 
+
+```{r}
+toAddCols <-  c("raw_counts", "median_length_normalized", "RPKM", "TPM")
+
+withCols <-  lapply(cated[toAddCols], addCols, id=cated$transcript[,1])
+
+lapply(withCols, function(i) head(i[,1:5]))
+```
+
+
+#Save the output
+
+```{r}
+save(withCols, file="/fh/fast/meshinchi_s/workingDir/TARGET/ALL_TARGET/TARGET_PhaseII/RNA/mRNAseq/level3/transcript/TARGET_ALL_phaseII_cat_trancriptLevel_rnaseq.RData")
+```
+
+
+```{r}
+path <- "/fh/fast/meshinchi_s/workingDir/TARGET/ALL_TARGET/TARGET_PhaseII/RNA/mRNAseq/level3/transcript/"
+# lapply(names(withCols), function(x) write.csv(withCols[[x]], 
+                                  # file=paste0(path,"TARGET_ALL_phaseII_trancriptLevel_rnaseq_",x,".csv")))
+
+
+```
+
+The isoform of interest is ENST00000493306 (NCBI Accession # NM_001314052) .  
+
+
+#Add Gene name information 
+
+```{r}
+IDmap <- read.csv("~/RNA_seq_Analysis/0000.00.02_Reference_GeneInfo/Homo_sapiens.GRCh37.87_Transcript.Gene.IDmap.csv", stringsAsFactors = FALSE)
+
+head(IDmap)
+# dim(IDmap) # 196501  by     4
+```
+
+
+```{r}
+sum(withCols$RPKM$gene_id %in% IDmap$transcript_id) #166,175
+dim(withCols$RPKM) #183,985 
+```
+
+
+Still missing 17,000 transcript IDs 
+
+```{r}
+AddGeneNames <- function(df){
+  
+  df <- df %>%
+    select(transcript_id=gene_id, everything()) %>%
+    left_join(.,  IDmap, by="transcript_id") %>%
+    select(gene_id,gene_name,transcript_id, transcript_name, everything())
+  
+  return(df)
+}
+```
+
+
+```{r}
+path <- "/fh/fast/meshinchi_s/workingDir/TARGET/ALL_TARGET/TARGET_PhaseII/RNA/mRNAseq/level3/transcript/"
+
+withGeneNames  <- lapply(withCols, AddGeneNames)
+
+# lapply(names(withGeneNames), function(x) write.csv(withGeneNames[[x]], 
+                                       # file=paste0(path,"TARGET_ALL_phaseII_trancriptLevel_rnaseq_withGeneNames",x,".csv")))
+
+
+
+```
+
+
+```{r}
+
+TPM.w.Genes <- AddGeneNames(withCols$TPM)
+  # select(gene_id,gene_name,transcript_id, transcript_name)
+
+head(TPM.w.Genes)
+# dim(TPM.w.Genes) #183985    206
+```
+
+
+```{r}
+KLF4 <- TPM.w.Genes %>%
+  filter(grepl("KLF4$", gene_name, ignore.case = TRUE)) %>%
+  select(transcript_id, everything(), -gene_id, -gene_name, -transcript_name) %>%
+  gather(var,val, -transcript_id) %>%
+  group_by(var) %>%
+  mutate(DominantSpecies=ifelse(val==max(val), transcript_id, "NotDominant")) %>%
+  mutate(DominantSpecies=ifelse(val==max(val) & max(val) == 0,"NotExpressed",DominantSpecies)) %>%
+  spread(transcript_id, val) %>%
+  mutate_if(is.numeric, funs(replace(.,is.na(.),0))) %>%
+  mutate_if(is.numeric, funs(sum)) %>%
+  ungroup() %>%
+  filter(DominantSpecies != "NotDominant") %>%
+  mutate(Group=ifelse(grepl("0[39]A",var), "Diagnostic","Relapse")) %>%
+  select(var,Group, everything())
+
+options(scipen = 999)
+# dim(KLF4)  #202 diagnostic/relapse specimins
+head(KLF4)
+# write.csv(KLF4, "~/RNA_seq_Analysis/0000.00.03_Expression_Matrices/TARGET_ALL_BCCA_Isoform.Quantification_KLF4_Transcripts_TPM.csv", row.names = FALSE)
+```
+
+
+```{r}
+lapply(KLF4[,4:8], quantile)
+```
+
+
+
+NOTE:
+
+If markdown cannot be completed with pandoc (memory issues), use the following
+
+> library("rmarkdown")
+> render("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/TARGET_AML_1031_Cat_RNAseq.Rmd", "html_document")
+
+
+#Session Info
+
+```{r}
+sessionInfo()
+```
+

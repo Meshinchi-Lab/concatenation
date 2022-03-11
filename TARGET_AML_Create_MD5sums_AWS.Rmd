@@ -1,0 +1,184 @@
+---
+title: "Create MD5 Sums for Fastqs and BAMs on AWS S3"
+author: "Jenny Smith"
+date: "4/6/21"
+output: html_document
+---
+
+# Set-up 
+
+```{r setup, cache = FALSE, include = FALSE}
+require(knitr)
+knitr::opts_knit$set(root.dir = file.path(TARGET,"SequencingDataMatrix"))
+```
+
+```{r}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),
+                      tidy=TRUE,
+                      fig.align='center',
+                      fig.width = 10, fig.height = 10)
+node=Sys.info()[["nodename"]]
+if(!grepl("local", node)){
+  print(node)
+  options(bitmapType = 'cairo')
+  grDevices::X11.options(type='cairo')
+}
+
+options(stringsAsFactors = FALSE)
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+
+library(aws.s3)
+library(aws.signature)
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+
+getwd()
+```
+
+
+# ClinData
+
+```{r}
+rna_sample_info <- read.csv(file.path(TARGET, "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_02.04.21.csv")) 
+
+dim(rna_sample_info)
+```
+
+```{r}
+fastq_manifest <- read.csv(file.path(TARGET, "SequencingDataMatrix/Fastq_manifests/TARGET_AML_RBD_PolyA_AWS_S3_Fastq_Manifest_11.17.20.csv"))
+
+head(fastq_manifest)
+```
+
+
+# Define Sample Sheets 
+
+```{r}
+#Set-up config
+creds <- aws.signature::use_credentials(profile = "default")
+Sys.setenv("AWS_ACCESS_KEY_ID" = creds$default$AWS_ACCESS_KEY_ID,
+           "AWS_SECRET_ACCESS_KEY" = creds$default$AWS_SECRET_ACCESS_KEY,
+           "AWS_DEFAULT_REGION"="us-west-2")
+
+
+blist <- bucketlist()
+blist
+
+BUCKET="fh-pi-meshinchi-s-eco-public"
+PREFIX="TARGET_AML/RNAseq_Illumina_Data/Fastq"
+```
+
+
+```{r}
+fastqs <- get_bucket_df(bucket = BUCKET, 
+                        prefix = PREFIX,
+                        max = Inf)
+head(fastqs) 
+dim(fastqs) #12721     8
+```
+
+```{r}
+# grep(".gz$", fastqs$Key, value=T, invert = T)
+```
+
+```{r}
+sample_sheet <- fastqs %>% 
+  select(Fastq=Key, Bucket, Size) %>%
+  filter(grepl(".gz$", Fastq)) %>% 
+  mutate(Sample=str_split_fixed(gsub(".(fastq|fq).gz","",Fastq), pattern="/",n=4)[,4],
+         Filename=paste("s3:/",Bucket, Fastq, sep = "/")) %>%
+  select(Sample, Filename, Size)
+  
+
+head(sample_sheet, n=20)
+dim(sample_sheet) #6258    3
+
+
+
+# write.table(sample_sheet,"Fastq_manifests/TARGET_AML_Fastqs_AWS_Filesizes_4.06.21.txt", row.names = F, quote=F, sep="\t")
+# write.table(select(sample_sheet, Sample, Filename), file.path(SCRIPTS, "STAR-fusion-NF/sample_sheets/TARGET_AML_Fastqs_MD5_Sample_Sheet.txt"), row.names = F, quote=F, sep="\t")
+```
+
+
+```{r}
+sample_sheet_redo <- fastqs %>% 
+  select(Fastq=Key, Bucket, Size, everything()) %>%
+  filter(grepl(".gz$", Fastq) | grepl(".md5$", Fastq)) %>% 
+  mutate(File=str_split_fixed(gsub(".md5$","",Fastq), pattern="/",n=4)[,4]) %>% 
+  select(File, everything()) %>% 
+  group_by(File) %>% 
+  mutate(N=n()) %>% 
+  ungroup() %>% 
+  
+  filter(N==1) %>% 
+  mutate(Sample=str_split_fixed(gsub(".(fastq|fq).gz","",Fastq), pattern="/",n=4)[,4],
+         Filename=paste("s3:/",Bucket, Fastq, sep = "/")) %>%
+  select(Sample, Filename, Size)
+
+
+sample_sheet_redo
+# write.table(select(sample_sheet_redo, Sample, Filename), file.path(SCRIPTS, "STAR-fusion-NF/sample_sheets/TARGET_AML_Fastqs_MD5_Sample_Sheet_v2.txt"), row.names = F, quote=F, sep="\t")
+```
+
+```{r}
+check_status <- fastqs %>% 
+  select(Fastq=Key, Bucket, Size, everything()) %>%
+  filter(grepl(".gz$", Fastq) | grepl(".md5$", Fastq)) %>% 
+  mutate(File=str_split_fixed(gsub(".md5$","",Fastq), pattern="/",n=4)[,4]) %>% 
+  select(File, everything()) %>% 
+  group_by(File) %>% 
+  mutate(N=n()) %>% 
+  ungroup()  %>% 
+  
+  # mutate(fastq_sample_filename=str_split_fixed(gsub("_[Rr][12]\\.(fastq|fq).gz","",Fastq), pattern="/",n=4)[,4]) %>%
+  select(N, everything())
+
+
+check_status
+# dim(check_status) #12554    10
+# table(check_status$N)
+
+```
+
+
+```{r}
+completed <- check_status %>% 
+  filter(N == 2)  
+  
+
+
+
+head(completed)
+dim(completed)  #12184    11
+
+
+write.csv(select(completed, -N, -File), file.path(TARGET, "SequencingDataMatrix/Fastq_manifests/TARGET_AML_AWS_Fastq_File_Manifest_04.07.21.csv"), row.names = FALSE)
+
+# write.csv(select(filter(completed, !grepl(".md5$", fastq_sample_filename)), -N), file.path(TARGET, "SequencingDataMatrix/Fastq_manifests/TARGET_AML_RBD_PolyA_SRA_on_AWS_Fastq_Manifest_04.05.21.csv"), row.names = FALSE) #6092   files
+```
+
+```{r}
+missing <- check_status %>% 
+  filter(N==1)
+
+dim(missing)
+# missing %>% 
+#   select(N, File, Fastq) %>% 
+#   View()
+```
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+

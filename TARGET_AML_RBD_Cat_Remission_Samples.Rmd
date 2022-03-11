@@ -1,0 +1,794 @@
+---
+title: "Concatenate RNA-seq"
+author: "Jenny Smith"
+date: "June 6, 2019"
+output: html_document
+---
+  
+
+#Set-up
+  
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 5, fig.width = 5)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,'/2020.09.01_Concatenate_Remission_RNAseq'))
+options(stringsAsFactors = FALSE)
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(reshape2)
+library(tidyr)
+library(tibble)
+library(magrittr)
+library(purrr)
+library(readr)
+
+library(DeGSEA)
+```
+
+```{r}
+#These functions are now in DeGSEA package.
+
+# source(file.path(SCRIPTS,"conversion_scripts/Merge_Cat_FixDupIDs_Function.r"))
+# source(file.path(SCRIPTS,"RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/R/rmDupGenes_Function.r"))
+```
+
+
+#Define Functions to be used. 
+
+
+```{r}
+#https://stackoverflow.com/questions/32040742/dplyrselect-including-all-other-columns-at-end-of-new-data-frame-or-beginni
+
+addCols <- function(df,symbol,feature_number=NULL){
+  library(dplyr)
+  
+  df <- df %>%
+    as.data.frame() %>%
+    mutate(geneSymbol=symbol) %>%
+    select(geneSymbol, everything()) 
+  
+  if(!is.null(feature_number)){
+    df <- df %>% 
+      add_column(feature_number=feature_number,.after = "geneSymbol")
+  }
+  
+  return(df)
+}
+```
+
+
+
+#Read in the Manifests and ID maps
+
+```{r}
+# merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_7.08.20.csv"))
+# merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_12.09.20.csv"))
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_05.21.21.csv"))  
+
+
+                   
+merged <- merged %>% 
+  filter(!is.na(USI), !grepl("Unknown",USI))
+
+
+
+dim(merged)
+```
+
+
+# Sample Manifest Creation 
+
+From BCCA:
+
+Hi Jenny,
+
+You asked about the library names associated with the following 2 barcodes:
+
+TARGET-20-PAWCAW-14A-01R is library D59852
+TARGET-20-PAXLFG-14A-01R is library D59833
+
+Sorry for the confusion. Moving forward we will append our internal library name to the file name so there is no confusion. This is why we don't typically use the external id in our file names as they are not always unique.
+
+Best,
+
+Reanne Bowlby
+Pronouns: she/her
+Assistant Bioinformatics Coordinator (Analysis PIpelines Team)
+Canada's Michael Smith Genome Sciences Centre (Vancouver, BC)
+
+
+```{r}
+LibraryIDs <- lapply(dir("References/", pattern="_samples_plate"), function(x){
+  read.csv(paste0("References/",x)) %>% 
+    mutate(Plate=x)
+}) %>% 
+  bind_rows()
+
+# LibraryIDs
+# table(LibraryIDs$Plate)
+```
+
+Library ID	Index	Flowcell	Lane	Sample ID	TARGET Barcode	Source ID	Timepoint
+D59649	TGTTGTGG-GTGTCCTT	H7FGGCCX2	8	TARGET-20-PAVWPW	TARGET-20-PAVWPW-14A-01R	SoM_2571	EOI 1
+D59932	TGTGAAGC-TCTAGGAG	H7FMMCCX2	6	TARGET-20-PAVWPW	TARGET-20-PAVWPW-14A-01R	SoM_2853	EOI 2
+
+TARGET-20-PAXIFA-14A-01R:
+D59814 (Complete)
+Original source: SoM_2735
+Source: 215848
+
+Pooled into: IX8460 (Complete)
+D59896 (Complete)
+Original source: SoM_2817
+Source: 215930
+
+TARGET-20-PAXLFG-14A-01R:
+D59833 (Complete)
+Original source: SoM_2754
+Source: 215867
+Pooled into: IX8465 (Complete)
+     
+D59899 (Complete)
+Original source: SoM_2820
+Source: 215933
+
+```{r}
+renamingFile <- read.csv("References/TARGET_AML_Remission_Refractory_EOI_Sample_Renaming_Merged_Manifest_01.14.2021.csv",
+                         na.strings = c("NA","N/A","")) %>% 
+  filter(grepl("Remission",Plate.ID), !is.na(Updated.TARGET.Barcode.w..Timepoint)) %>% 
+  select(Original.Source.Name,Sample.ID,
+         Plate.ID, 
+         Updated.TARGET.Barcode.w..Timepoint) 
+
+
+
+head(renamingFile)
+dim(renamingFile)
+# table(is.na(renamingFile$Original.Source.Name))
+# table(is.na(renamingFile$Updated.TARGET.Barcode.w..Timepoint))
+```
+
+
+```{r}
+# file <- "RNA/mRNAseq/metadata/RNAseq_Submission_Manifests_SOWs/SOW_GSC-1832/Tracking_Sheet/SOW_GSC-1832_Data_Download_Tracking_Sheet_asOf_01.15.2021.xlsx"
+file <- "RNA/mRNAseq/metadata/RNAseq_Submission_Manifests_SOWs/SOW_GSC-1832/Tracking_Sheet/SOW_GSC-1832_Data_Download_Tracking_Sheet_asOf_04.30.2021.xlsx"
+
+trackingFile <- openxlsx::read.xlsx(file.path(TARGET,file))  %>% 
+  left_join(.,renamingFile, by=c("Original.Source.Name","Sample.ID", "Plate.ID"))
+
+
+dim(trackingFile) #725  20
+# table(is.na(trackingFile$LIBRARY), grepl("Remission", trackingFile$Plate.ID)) #48 are missing LibraryIDs. 8 remission, and 40 others
+
+
+#Keep the good entries separate
+trackingFile.OK <- filter(trackingFile, !is.na(LIBRARY))
+dim(trackingFile.OK) #677  files have Library IDs
+
+#Fix missing library IDs for non-remission samples
+#3 samples failed sequencing.
+trackingFile.missing <- filter(trackingFile, is.na(LIBRARY), !grepl("Remission", Plate.ID)) %>%
+  left_join(., filter(LibraryIDs, !grepl("remission", Plate)) %>%
+               select(Sample.ID, Library, Plate),
+            by = "Sample.ID") %>%
+  select(Sample.ID, Library, LIBRARY, Plate, Plate.ID ,everything()) %>%
+  mutate(LIBRARY=case_when(
+    is.na(Library) ~ "Failed Sequencing",
+    TRUE ~ Library)) %>%
+  select(-Library, -Plate) %>%
+  arrange(Sample.ID)
+dim(trackingFile.missing) #40 files missing that are non-EOI samples 
+
+
+table(trackingFile.missing$Comments) #27 files should have been downloaded but are missing.
+#Though the tracking file states that 9 samples failed construction, not just 3 --- but 6/9 have library IDs from the BCCA LIMS.
+#table(trackingFile.missing$Sample.ID %in% LibraryIDs$Sample.ID) #37 are in the plates, and 3 failed lib construction
+# filter(trackingFile.missing, Comments=="Failed library construction")
+
+
+#These are under review by BCCA
+trackingFile.missingRem <- filter(trackingFile, is.na(LIBRARY), grepl("Remission", Plate.ID))
+dim(trackingFile.missingRem) #8 EOI samples missing 
+
+
+#Merge in the updated Library IDs and the other Samples' tracking file
+trackingFile <- trackingFile.OK %>%
+  bind_rows(., trackingFile.missing) %>% 
+  bind_rows(., trackingFile.missingRem)
+
+
+# head(trackingFile)
+dim(trackingFile) #725 20
+
+# trackingFile[grep("PAXLFG|PAWCAW|PAXIFA", trackingFile$Sample.ID),] #PAWCAW and PAXFLG and PAXIFA will have duplicates!
+```
+
+
+```{r}
+IDmap <- read.csv("References/library_mapping.csv") %>% 
+    select(1:2) %>% 
+    rename_all(~c("LIBRARY", "Sample.ID"))  %>% 
+    mutate(UniqueID=paste(Sample.ID, LIBRARY, sep="_"),
+           Batch="rem1",
+           Original_Sample.ID_fromFTP=LIBRARY) %>% 
+    left_join(., select(trackingFile, Sample.ID, LIBRARY, Original.Source.Name,
+                        Anatomic.Site, Plate.ID, Anonymous.Patient.ID),
+            by=c("Sample.ID","LIBRARY")) 
+
+
+dim(IDmap) #300   10
+# table(duplicated(IDmap$Sample.ID)) #26 Replicates (or different EOI timepoints)
+# table(duplicated(IDmap$LIBRARY)) #OK FALSE
+# table(IDmap$Sample.ID %in% trackingFile$Sample.ID) #OK
+# table(IDmap$LIBRARY %in% trackingFile$LIBRARY) #OK
+
+# grep("PAXLFG|PAWCAW", IDmap$Sample.ID) #OK these need disambiguation
+```
+
+
+```{r}
+#The new gene expn files have been renamed to the TARGET Barcode by BCCA.
+#So it changes things a little bit. Earlier batches were in the library number (D[0-9]*)
+files_2021 <- dir(file.path(SCRATCH,"2020.06.10_BCCA_mRNAseq_Remission_Data_Download/gene_expression"), 
+                     recursive = T,
+                     pattern = "transcript.quantification.txt$") %>% 
+  grep("^D[0-9]", ., value = T, invert = TRUE) %>% 
+  gsub("^.+\\/((TARGET|unknown).+)\\/.+transcript.quantification.txt$", "\\1", .) %>% 
+  gsub("\\/TARGET.+quant.+$", "", .) %>%
+  as.data.frame() %>%
+  rename_all(~c("Sample.ID"))
+  
+dim(files_2021) # 408   1
+```
+
+```{r}
+files_2021.clean <-  files_2021 %>% 
+  mutate(Original_Sample.ID_fromFTP=Sample.ID) %>% 
+  separate(Sample.ID, into = c("Sample.ID","Source.Name"), sep="_",extra = "merge", fill="warn") %>%
+  mutate_at(vars(Sample.ID), ~case_when(
+    !is.na(Source.Name) & ! grepl("SoM", Source.Name) ~ paste(., Source.Name,sep="_"),
+    TRUE ~ .)) %>%
+  mutate_at(vars(Source.Name),~case_when(
+    ! grepl("SoM", .) ~ NA_character_,
+    TRUE ~ .)) %>%
+  mutate(Library_Appended=case_when(
+    grepl("_D[0-9]+$", Sample.ID) ~ str_split_fixed(Sample.ID, pattern="_", n=2)[,2],
+  )) %>% 
+  mutate(Sample.ID=gsub("_D[0-9]+", "", Sample.ID)) %>% 
+  #There were 3 unknowns and these were updated manually using the tracking file and/or the LIMS system from BCCA 
+  mutate_at(vars(Sample.ID), ~case_when(
+    Library_Appended == "D75116" ~ "TARGET-20-UPN1597-04A-01R",
+    Library_Appended == "D59612" ~ "TARGET-20-PAVDNF-14A-01R",
+    Library_Appended == "D59897" ~ "TARGET-20-PAVDNF-14A-01R",
+    TRUE ~ .)) %>% 
+
+  #Joining the tracking file causes many duplicates which need to be cleaned. 
+  left_join(., select(trackingFile, Sample.ID, LIBRARY, Original.Source.Name, Anatomic.Site, Plate.ID, Anonymous.Patient.ID),
+            by="Sample.ID") %>% 
+  mutate_at(vars(LIBRARY), ~case_when(
+    !is.na(Library_Appended) ~ Library_Appended,
+    TRUE ~ .)) %>% 
+  
+  #These 3 samples had many duplicates and were missing Library IDs and BAM files in the tracking file. 
+  #See email above from Reanne B. to clarify which samples of PAWCAW and PAXLFG we recieved initially in Feb. 2021
+  #The unknowns were found using the BCCA LIMS + LIBRARY +SOM to map it to the USI in the tracking file. 
+  mutate(Keep=case_when(
+    Sample.ID == "TARGET-20-PAWCAW-14A-01R" & LIBRARY == "D59852" ~ TRUE,
+    Sample.ID == "TARGET-20-PAWCAW-14A-01R" & LIBRARY != "D59852" ~ FALSE,
+    Sample.ID == "TARGET-20-PAXIFA-14A-01R" & LIBRARY == "D59896" &  Original.Source.Name =="SoM_2817" ~ TRUE,
+    Sample.ID == "TARGET-20-PAXIFA-14A-01R" & LIBRARY == "D59896" &  Original.Source.Name !="SoM_2817" ~ FALSE,
+    Sample.ID == "TARGET-20-PAXLFG-14A-01R" & LIBRARY == "D59833" ~ TRUE,
+    Sample.ID == "TARGET-20-PAXLFG-14A-01R" & LIBRARY == "D59899" &  Original.Source.Name == "SoM_2820" ~ TRUE,
+    Sample.ID == "TARGET-20-PAXLFG-14A-01R" & LIBRARY == "D59899" &  Original.Source.Name != "SoM_2820" ~ FALSE,
+    Sample.ID == "TARGET-20-PAXLFG-14A-01R" & is.na(LIBRARY) ~ FALSE,
+    Sample.ID == "TARGET-20-PAVDNF-14A-01R" & LIBRARY == "D59612" & Original.Source.Name == "SoM_2534" ~ TRUE, 
+    Sample.ID == "TARGET-20-PAVDNF-14A-01R" & LIBRARY == "D59612" & Original.Source.Name != "SoM_2534" ~ FALSE,
+    Sample.ID == "TARGET-20-PAVDNF-14A-01R" & LIBRARY == "D59897" & Original.Source.Name == "SoM_2818" ~ TRUE,
+    Sample.ID == "TARGET-20-PAVDNF-14A-01R" & LIBRARY == "D59897" & Original.Source.Name != "SoM_2818" ~ FALSE,
+    TRUE ~ TRUE
+  )) %>% 
+  filter(Keep) %>% 
+  
+  #Create a unique ID with the Sample ID and Library number to differentiate them from the original 300 samples disseminated. 
+  mutate(UniqueID=paste(Sample.ID, LIBRARY, sep="_"),
+         Batch="rem2") %>% 
+  
+  # Disambiguation Steps (luckily not too many samples were duplicated)
+  filter(!UniqueID %in% IDmap$UniqueID) %>%   #Only keep samples that were not previously disseminated
+  filter(ifelse(!is.na(Source.Name) & Source.Name!=Original.Source.Name, FALSE, TRUE)) %>%  #use provided SoM to disambiguate these two samples.
+  select(Sample.ID, Original_Sample.ID_fromFTP,
+         -Keep,
+         -Library_Appended,
+         -Source.Name,
+         everything())
+
+ 
+head(files_2021.clean)
+dim(files_2021.clean) #408   10
+```
+
+```{r}
+table(files_2021.clean$Sample.ID %in% trackingFile$Sample.ID) #OK 
+# table(files_2021.clean$Sample.ID %in% IDmap$Sample.ID) #10 EOI samples from different time points
+
+#Check that all samples are unique to each of the two lists - original dissemination of 300 and the following disseminations
+# table(files_2021.clean$LIBRARY %in% IDmap$LIBRARY) #OK no overlap
+# table(files_2021.clean$Original.Source.Name %in% IDmap$Original.Source.Name) #OK no overlap
+# any(is.na(files_2021.clean$LIBRARY)) #OK no NAs
+# table(duplicated(files_2021.clean$LIBRARY)) # OK No Dups
+# any(is.na(files_2021.clean$Original.Source.Name))#OK no NAs
+# table(duplicated(files_2021.clean$Original.Source.Name)) #OK no dups
+
+
+# files_2021.clean$Sample.ID[duplicated(files_2021.clean$Sample.ID)] #TARGET-20-PAWIDI-14A-01R, TARGET-20-PAVDNF-14A-01R, and TARGET-20-PAXLFG-14A-01R samples with EOI1/2 time points
+
+
+#TO Check on the 5 duplicates with EOI ambiguity that needed to be custom filtered. 
+# filter(files_2021,
+#        grepl("PAXIFA|PAXLFG|PAWCAW|PAWIDI|PAVDNF|unknown-56", Sample.ID)) %>%
+#   arrange(Sample.ID)
+# 
+# filter(files_2021.clean,
+#        grepl("PAXIFA|PAXLFG|PAWCAW|PAWIDI|PAVDNF", Sample.ID)) %>%
+#    arrange(Sample.ID)
+# 
+# filter(IDmap,
+#        grepl("PAXIFA|PAXLFG|PAWCAW|PAWIDI|PAVDNF", Sample.ID))
+# 
+# 
+# filter(trackingFile,
+#        grepl("PAXIFA|PAXLFG|PAWCAW|PAWIDI|PAVDNF", Sample.ID)) %>%
+#   select(1:2,LIBRARY,everything()) %>%
+#   arrange(Sample.ID)
+
+
+#How to Deal with the Unknowns in Sample.ID provided by BCCA
+# filter(files_2021,
+#        grepl("unknown", Sample.ID)) %>%
+#   arrange(Sample.ID)
+# 
+# filter(trackingFile,
+#        grepl("D59612|D59897|D75116", LIBRARY)) %>%
+#   select(1:2,LIBRARY,everything()) %>%
+#   arrange(Sample.ID)
+# 
+# 
+# filter(trackingFile,
+#        grepl("SoM_2534|SoM_2818", Original.Source.Name)) %>%
+#   select(1:2,LIBRARY,everything()) %>%
+#   arrange(Sample.ID)
+```
+
+
+```{r}
+#for the sake of renaming, I will simple subset the manifest for now with inner_join to the ID map. 
+manifest <- bind_rows(select(IDmap, Sample.ID, LIBRARY, Batch, Original.Source.Name,
+                             Original_Sample.ID_fromFTP, Anatomic.Site, Plate.ID, Anonymous.Patient.ID),
+                      select(files_2021.clean, Sample.ID, LIBRARY, Batch, Original.Source.Name,
+                             Original_Sample.ID_fromFTP, Anatomic.Site, Plate.ID, Anonymous.Patient.ID)) %>% 
+
+  left_join(., select(renamingFile, -Plate.ID),
+            by=c("Sample.ID", "Original.Source.Name")) %>%
+  mutate(USI=str_split_fixed(Sample.ID, "-", n=5)[,3]) %>% 
+  mutate(Sample=case_when(
+                  !is.na(Updated.TARGET.Barcode.w..Timepoint) ~ gsub("-", "\\.", Updated.TARGET.Barcode.w..Timepoint),
+                  TRUE ~ gsub("-", "\\.", Sample.ID)),
+    Final_Patient_ID=gsub("\\.","-", Sample)) %>%
+
+  select(Sample,
+         PATIENT_ID_Original=Sample.ID,
+         Final_Patient_ID,
+         Original_Sample.ID_fromFTP,
+         USI,Batch,
+         everything(),
+         -Updated.TARGET.Barcode.w..Timepoint)
+
+
+
+# table(duplicated(manifest$Sample)) #OK
+# table(duplicated(manifest$LIBRARY)) #OK
+# table(duplicated(manifest$Original.Source.Name)) #OK
+
+
+dim(manifest) #708  10
+head(manifest)
+# write.csv(manifest,"TARGET_AML_Remission_JMML_APL_MDA_CordBlood_RNAseq_Manifest_06.08.21.csv", row.names = FALSE)
+# filter(manifest,  grepl("PAXLFG|PAWCAW", PATIENT_ID_Original))
+```
+
+
+
+#Identify Files to Be Concatenated
+
+We have intron and exon level counts. However, I would want only the concatenated level files to be on the fast drive now. All patient level can be archived directly. 
+
+```{r}
+filepath <-  file.path(SCRATCH,"2020.06.10_BCCA_mRNAseq_Remission_Data_Download/gene_expression")
+
+gene <- dir(path = filepath, 
+                pattern = "transcript.normalized$|transcript.quantification.txt$",
+                recursive = TRUE,
+                full.names = TRUE)
+
+# head(gene)
+# tail(gene)
+length(gene) #708 
+```
+
+```{r}
+# intron_sizes <- read.table("intron_file_lengths.txt") #3 samples have an odd number of lines??
+
+# head(intron_sizes)
+# table(intron_sizes$V1)
+# intron_sizes[which(intron_sizes$V1 != 273706),]
+
+#These need to be merged differently. Not just cbind() 
+intron <- dir(path = filepath, pattern = "intron.ratios.normalized$|intron.quantification.txt$",
+                recursive = TRUE,full.names = TRUE)
+  # .[!grepl("D59591|D59621|D59690",.)]
+
+
+# head(intron)
+# tail(intron)
+length(intron) #708
+```
+
+```{r}
+exon <- dir(path = filepath, pattern = "exon.normalized$|exon.quantification.txt$",
+                recursive = TRUE,full.names = TRUE)
+
+# head(exon)
+length(exon) #708
+```
+
+
+#Columns Description
+
+_the .transcript.normalized file contains:_
+
+-*column 1: gene id*
+-column 2: transcript id or "merged_<gene_id>" if the analysis was performed in
+collapse mode
+-colomn 3: chromosome
+-column 4: start of the transcript (relative to the positive strand, so
+start<end)
+-column 5: end of the transcript (relative to the positive strand, so start<end)
+-column 6: strand of the annotation ("+" or "-")
+-column 7: sum of the length of all exons in this transcript or collapsed gene
+-column 8: sum of the length of all introns in this transcript or collapsed gene
+-*column 9*: number of fractional reads inside this merged_gene or transcript's
+exons (sum of the fraction of each read inside all exons)
+-column 10: total coverage across all the exons in this merged_gene or transcript
+(sum of the coverage depth at each base in all exons)
+-column 11: number of fractional reads inside this merged_gene or transcript's
+introns (sum of the fraction of each read inside all introns)
+-column 12: total coverage across all the introns in this merged_gene or
+transcript (sum of the coverage depth at each base in all introns)
+-column 13: average coverage over all exons -- sum of the coverage depth at each
+base in all exons divided by the sum of the exon lengths)
+-column 14: average coverage over all introns and exons -- sum of the coverage
+depth at each base between the merged_gene or transcript's start and end
+divided by the number of bases between the gene's start and end
+-*column 15*: normalized coverage (RPKM) -- (number of fractional reads in all exons
+in this merged gene or transcript x 1000000000)/(NORM_TOTAL x sum of the
+length of all exons in this merged gene or transcript)
+-*column 16*: gene symbol (or gene id if symbol is unavailable)
+-column 17: biotype (or "-" if biotype unavailable)
+-column 18: gene description (or "-" if description is unavailable)
+
+
+_The .exon.normalized file contains: For BCCA_
+-*column 1*: gene id
+-column 2: transcript id or "merged_<gene_id>" if the analysis was performed in
+collapse mode
+-colomn 3: strand of the annotation ("+" or "-")
+-*column 4*: exon number (relative to the gene's strand)
+-column 5: "exon" (annotation type)
+-column 6: chromosome
+-column 7: start of the exon (relative to the positive strand, so start<end)
+-column 8: end of the exon (relative to the positive strand, so start<end)
+-*column 9*: number of fractional reads inside this exon's boundaries (sum of the
+fraction of each read inside this region)
+-column 10: total coverage across this exon (sum of the coverage depth at each
+base in this exon)
+-column 11: average coverage inside this exon-- total coverage across this exon
+divided by the exon's length
+-*column 12*: normalized average coverage inside this exon (RPKM) -- (number of this
+exon's fractional reads x 1000000000) / (NORM_TOTAL x exon length)
+
+
+_The .intron.ratios.normalized file contains:_
+
+-*column 1*: gene id
+-column 2: transcript id or "merged_<gene_id>" if the analysis was performed in
+collapse mode
+-colomn 3: strand of the annotation ("+" or "-")
+-*column 4*: intron number (relative to the gene's strand)
+-column 5: "intron" (annotation type)
+-column 6: chromosome
+-column 7: start of the intron (relative to the positive strand, so start<end)
+-column 8: end of the intron (relative to the positive strand, so start<end)
+-*column 9*: number of fractional reads inside this intron's boundaries (sum of the
+fraction of each read inside this region)
+-column 10: total coverage across this intron (sum of the coverage depth at each
+base in this intron)
+-column 11: collapsed gene or transcript length
+-column 12: average coverage of the collapsed gene or transcript
+-column 13: intron length
+-column 14: average coverage inside this intron-- total coverage across this
+intron divided by the intron's length
+-column 15: intron-to-gene coverage ratio: average intron coverage divided by the
+average collapsed gene or transcript coverage
+-column 16: duplicate of column 14
+-*column 17*: normalized average coverage inside this intron (RPKM) -- (number of
+this intron's fractional reads x 1000000000) / (NORM_TOTAL x intron length)
+
+
+#Begin Concatenation 
+
+```{r}
+#list of counts files
+results <- list("gene"=gene,"exon"=exon)
+
+
+#Pattern to select the Target Barcode/GSC barcode
+pattern <- "^.+\\/(TARGET-20.+R(_D[0-9]{5}|_SoM_[0-9]{4})?|D[0-9]{5}|unknown-[0-9]{2}_D[0-9]+)[\\._].+" 
+
+test <- gsub(pattern, "\\1", gene)
+
+# test
+# grep("D59612|D59897|D75116", test, value=T)
+# grep("TARGET-20-PAVCZF-14A-01R|TARGET-20-PAXLFG-14A-01R_D59899", test, value = T)
+# grep("PAWIDI", gene, value=T)
+# table(manifest$Original_Sample.ID_fromFTP %in% test)
+# table(test %in% manifest$Original_Sample.ID_fromFTP)
+```
+
+```{r}
+#Select the column indices 
+selected <- list("gene"=c(1,9,15,16),
+                 "exon"=c(1,4,9,12))
+
+# "intron"=c(1,4,9,17)
+```
+
+```{r}
+#DO NOT USE FURRR anymore. its really not working anymore. 
+
+library(furrr)
+future::plan("multisession")
+cated <- furrr::future_map2(results, selected, catExpnData, regex=pattern)
+names(cated) <- names(results)
+
+names(cated$gene) <- c("gene_id","counts","RPKM","geneSymbol")
+names(cated$exon) <- c("gene_id","exon_number","counts","RPKM")
+```
+
+```{r}
+intron_cols <- c(1,4,9,17)
+intron.dfs <- lapply(intron, function(x){
+  df <- read.delim(x, header = F, sep="\t") %>% 
+    select(all_of(intron_cols)) %>% 
+    rename_all(~c("gene_id","intron_number","counts","RPKM"))
+})
+
+intron.df <- Reduce(f = full_join, x = intron.dfs, by="")
+
+dim(intron.df)
+```
+
+
+```{r}
+summary(cated)
+# lapply(cated,function(x) lapply(x, function(y) head(y[,1:5])))
+lapply(cated, function(x) lapply(x, function(y) dim(y)))
+# lapply(cated, function(x) lapply(x, function(y) class(y)))
+```
+
+
+#Add in TPMs 
+
+```{r}
+cated$gene[["TPM"]] <- apply(cated$gene$RPKM,2, RPKM_to_TPM)
+table(apply(cated$gene[["TPM"]], 2, sum)) #all sum to 1 million 
+```
+
+```{r}
+cated$exon[["TPM"]] <- apply(cated$exon$RPKM,2, RPKM_to_TPM)
+
+table(apply(cated$exon[["TPM"]], 2, sum)) #all sum to 1 million 
+```
+
+```{r}
+cated$intron[["TPM"]] <- apply(cated$intron$RPKM,2, RPKM_to_TPM)
+
+table(apply(cated$intron[["TPM"]], 2, sum)) #all sum to 1 million 
+```
+
+```{r}
+map(cated, ~map(., ~head(.[,1:5])))
+map(cated, ~map(., dim))
+```
+
+
+#Check that the Gene Ids are in the Same Order
+
+```{r}
+table(apply(cated$gene$geneSymbol,2,
+            function(x) identical(x=x, y=cated$gene$geneSymbol[,1])))
+```
+
+```{r}
+table(apply(cated$exon$gene_id,2, 
+            function(x) identical(x=x, y=cated$exon$gene_id[,1])))
+```
+
+```{r}
+table(apply(cated$intron$gene_id,2, 
+            function(x) identical(x=x, y=cated$intron$gene_id[,1])))
+```
+
+
+#Add columns for the Gene Symbol and Ensembl Symbol 
+
+```{r}
+dim(manifest)
+# any(duplicated(manifest$Sample)
+```
+
+```{r}
+#Rename based on the provided Manifest 
+cols <- data.frame(Colnames=colnames(cated$gene$counts)
+                   # file=gsub("^.+(D[0-9]+|TARGET.+$)","\\1",gene)
+                   ) %>% 
+  left_join(., manifest, by=c("Colnames"="Original_Sample.ID_fromFTP"))
+  # mutate(Joining_Col=gsub(".transcript.quantification.txt", "", file) %>% 
+  #          gsub("_1_.+$", "", .)) %>% 
+  # mutate(Batch=ifelse(grepl("^D[0-9]", Colnames), "rem1", "rem2")) %>% 
+  # 
+  # left_join(., select(manifest,Batch, PATIENT_ID_Original, Sample, LIBRARY, Original.Source.Name), 
+  #           by=c("Joining_Col"="LIBRARY", "Batch")) %>% 
+  # left_join(., select(manifest, PATIENT_ID_Original, Batch, Sample, LIBRARY, Original.Source.Name), 
+  #           by=c("Joining_Col"="PATIENT_ID_Original", "Batch")) %>% 
+  # mutate(Sample_Final=case_when(
+  #   is.na(Sample.x) ~ Sample.y, 
+  #   is.na(Sample.y) ~ Sample.x))
+
+
+head(cols)
+dim(cols) # 708   8
+# table(duplicated(cols$Colnames))
+# table(duplicated(cols$Sample))
+# View(cols$Sample)
+```
+
+```{r}
+gene.final <- lapply(cated$gene[c(2,3,5)], 
+                     function(x) 
+                       set_colnames(x, cols$Sample) %>% 
+                       addCols(df=., symbol = cated$gene$geneSymbol[,1], feature_number=cated$gene$gene_id[,1]) %>% 
+                       set_colnames(., value = c("geneSymbol","gene_id", cols$Sample)))
+
+
+lapply(gene.final, function(x) head(x[,1:5]))
+# map(gene.final, ~sum(is.na(colnames(.)))) #no NAs
+# map(gene.final, ~sum(duplicated(colnames(.)))) #no dups
+```
+
+```{r}
+exon.final <- lapply(cated$exon[c(3:5)], function(x) 
+                       set_colnames(x, cols$Sample) %>% 
+                       addCols(df=., symbol = cated$exon$gene_id[,1], feature_number = cated$exon$exon_number[,1]) %>% 
+                       set_colnames(., value = c("gene_id", "exon_number", cols$Sample)))
+
+lapply(exon.final,function(x) head(x[,1:5]))
+```
+
+```{r}
+cols_intron <- data.frame(GSC.Library=colnames(cated$intron$counts)) %>% 
+  left_join(., select(manifest, Sample.ID, GSC.Library), 
+            by="GSC.Library") 
+
+# head(cols_intron)
+dim(cols_intron)
+
+
+intron.final <- lapply(cated$intron[c(3:5)], function(x) addCols(df=x, symbol = cated$intron$gene_id[,1], 
+                                                          feature_number = cated$intron$intron_number[,1]) %>% 
+                         set_colnames(., value = c("gene_id","intron_number", gsub("-",".",cols_intron$Sample.ID))))
+
+
+# lapply(intron.final,function(x) head(x[,1:5]))
+# lapply(intron.final,function(x) dim(x))
+```
+
+#Save the output
+
+```{r}
+for (final in ls(pattern="final")){
+  for (df in names(get(final))){
+      if(df == "counts"){
+        n <- "FractionalCounts"
+      }else{
+        n <- df
+      }
+    
+      type <- gsub(".final","Level",final)
+      filename <- paste("ExpnData/TARGET_Remission_JMML_APL_MDA_CordBlood_Ribodepleted_RNAseq",type,n,sep="_") %>% 
+        paste0(.,".csv")
+      
+      # print(filename)
+      write.csv(get(final)[[df]], file = filename, row.names = FALSE)
+      
+      filename2 <- file.path(TARGET,"RNA/mRNAseq/level3/gene/concat_matrices/2020June_BCCA_1031_Remission_Concatentated_GRCh37_Illumina_Data", 
+                            paste0(paste("TARGET_Remission_JMML_APL_MDA_CordBlood_Ribodepleted_RNAseq",type,n,sep="_"), ".csv"))
+      # print(filename2)  
+      # write.csv(get(final)[[df]], file = filename2, row.names = FALSE)
+  }
+}
+
+```
+
+
+#Remove Duplicate Genes 
+
+```{r}
+cts <- read_csv("ExpnData/TARGET_Remission_JMML_APL_MDA_CordBlood_Ribodepleted_RNAseq_geneLevel_FractionalCounts.csv")
+cts <- as.data.frame(cts)
+
+dim(cts) #[1] 58450   301
+head(cts[,1:5])
+```
+
+```{r}
+TPM <- read_csv("ExpnData/TARGET_Remission_JMML_APL_MDA_CordBlood_Ribodepleted_RNAseq_geneLevel_TPM.csv")
+TPM <- as.data.frame(TPM)
+
+dim(TPM) #58450   710
+head(TPM[,1:5])
+```
+
+```{r}
+rmDup_cts <- rmDupGenes(expnData = cts, 
+                        geneCol = "geneSymbol")
+
+dim(rmDup_cts$remDups) #51573 708
+head(rmDup_cts$remDups[,1:5])
+
+
+
+# write.csv(rmDup_cts$remDups,file.path(PROJHOME, "0000.00.03_ExpressionMatrices/BCCA_GRCh37_Ensembl_v69/TARGET_AML_Remission_JMML_APL_MDA_CordBlood_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_FractionalCounts.csv"))
+```
+
+```{r}
+rmDup_TPM <- rmDupGenes(expnData = TPM, 
+                        geneCol="geneSymbol")
+
+dim(rmDup_TPM$remDups) #51573   708
+head(rmDup_TPM$remDups[,1:5])
+
+
+# write.csv(rmDup_TPM$remDups, file.path(PROJHOME, "0000.00.03_ExpressionMatrices/BCCA_GRCh37_Ensembl_v69/TARGET_AML_Remission_JMML_APL_MDA_CordBlood_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_TPM.csv"))
+```
+
+
+
+NOTE:
+  
+  If markdown cannot be completed with pandoc (memory issues), use the following
+
+> library("rmarkdown")
+> render("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/TARGET_AML_1031_Cat_RNAseq.Rmd", "html_document")
+
+
+#Session Info
+
+```{r}
+sessionInfo()
+```
+

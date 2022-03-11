@@ -1,0 +1,502 @@
+---
+title: "Concatenate RNA-seq"
+author: "Jenny Smith"
+date: "May 18, 2021"
+output: html_document
+---
+
+
+#Set-up 
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 5, fig.width = 5)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME, '/2020.09.01_Concatenate_Remission_RNAseq'))
+```
+
+```{r message=FALSE}
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(magrittr)
+
+library(ggplot2)
+library(stringr)
+library(reshape2)
+library(DeGSEA)
+library(aws.s3)
+library(aws.signature)
+getwd()
+```
+
+```{r}
+# source(file.path(SCRIPTS,"conversion_scripts/Merge_Cat_FixDupIDs_Function.r"))
+# source(file.path(SCRIPTS,"/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/R/rmDupGenes_Function.r"))
+```
+
+# Read in the Manifests
+
+```{r}
+# sample_info <- read.csv(file.path(TARGET,
+#                                     "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_06.09.21.csv")) 
+
+sample_info <- read.csv(file.path(TARGET,
+                                    "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_08.12.21.csv"))
+
+
+dim(sample_info)
+table(sample_info$Batch)
+```
+
+
+# Define Sample Sheets for Kallisto 
+
+```{r}
+remission_samples <- sample_info %>% 
+  filter(grepl("rem", Batch))
+
+
+head(remission_samples)
+dim(remission_samples)
+```
+
+```{r}
+#Set-up config
+creds <- aws.signature::use_credentials(profile = "default")
+Sys.setenv("AWS_ACCESS_KEY_ID" = creds$default$AWS_ACCESS_KEY_ID,
+           "AWS_SECRET_ACCESS_KEY" = creds$default$AWS_SECRET_ACCESS_KEY,
+           "AWS_DEFAULT_REGION"="us-west-2")
+
+
+blist <- bucketlist()
+blist
+
+BUCKET="fh-pi-meshinchi-s-eco-public"
+PREFIX="TARGET_AML/RNAseq_Illumina_Data/BAM"
+
+bams <- get_bucket_df(bucket = BUCKET, prefix = PREFIX,
+                      max = Inf)
+head(bams) #9319    8
+# dim(bams)
+```
+
+```{r}
+old_bams <- dir(file.path(SCRATCH, "jlsmith3/CBFGLIS/BAMs")) #Need to delete off of S3 
+length(old_bams)
+
+#These are the usable BAM files
+rem_bams <- dir(file.path(SCRATCH, "2020.06.10_BCCA_mRNAseq_Remission_Data_Download/renamed_sorted_bams"), pattern = "*.bam$")
+
+head(rem_bams)
+length(rem_bams) #677
+```
+
+```{r}
+#Well, BCCA has not given us many of the counts data/transabyss data. ugh.... 
+#So I cant even use the manifest file we've got prepared from BCCA data disseminations
+# files.regex  <- remission_samples %>% 
+#   pull("Final_Patient_ID") %>% 
+#   paste(., collapse="|")
+
+files.regex <- rem_bams %>% 
+  paste(., collapse = "|")
+  
+
+sample_sheet <- bams %>% 
+  select(BAM=Key) %>%
+  filter(grepl(files.regex, BAM), grepl(".bam$", BAM)) %>%  
+  mutate(Sample=str_split_fixed(gsub("\\.srt\\.bam$|\\.bam$","",BAM), pattern="/",n=4)[,4],
+         BAM=paste("s3:/",BUCKET, BAM, sep = "/")) %>%
+  select(Sample, BAM)
+  
+
+head(sample_sheet)
+dim(sample_sheet) #677   2
+# write.table(sample_sheet,"Remission_APL_JMML_MDA_Sample_Sheet.txt", row.names = F, quote=F, sep="\t")
+# write.table(sample_sheet,file.path(SCRIPTS, "batch_pipeline/sample_sheets/Remission_JPL_JMML_MDA_Sample_Sheet.txt"), row.names = F, quote=F, sep="\t")
+```
+
+*NOTE we are missing a bunch of files from the RNAseq counts/TransAbyss :/
+here are 3 at least 
+"TARGET.20.CB34pos.Dayminus1.00.01R" "TARGET.20.D7.EC.mock2.00.01R"       "TARGET.20.D7.EC.GFP1.00.01R"
+
+
+# Run Kallisto
+
+```{bash eval=FALSE}
+cd ~/scripts/batch_pipeline
+./kallisto_run.sh
+```
+
+
+
+## Re-submit Samples
+
+```{r}
+BUCKET="fh-pi-meshinchi-s-eco-public"
+PREFIX="TARGET_AML/RNAseq_Illumina_Data/Fastq"
+
+fastqs <- get_bucket_df(bucket = BUCKET, 
+                        prefix = PREFIX,
+                        max = Inf)
+head(fastqs) #15429     8
+# dim(fastqs)
+```
+
+```{r}
+fastqs <- fastqs %>% 
+  mutate(Sample=str_split_fixed(Key, pattern = "/", n=4)[,4]) %>% 
+  mutate(Sample=gsub("_r[12].fq.gz|.md5", "", Sample)) %>% 
+  filter(Sample != "" ) %>% 
+  select(Sample, Key, everything())
+
+head(fastqs)
+# fastqs
+```
+
+```{r}
+done <- fastqs %>% 
+  filter(Sample %in% sample_sheet$Sample)
+
+length(unique(done$Sample)) #677 OK completed
+
+missing <- sample_sheet %>% 
+  filter(!Sample %in% fastqs$Sample)
+
+# dim(missing)
+# missing
+```
+
+```{r}
+files.regex <- sample_sheet %>% 
+  pull(Sample) %>% 
+  paste(., collapse = "|")
+
+kallisto_res <- get_bucket_df(bucket = BUCKET, 
+                              prefix = "TARGET_AML/RNAseq_Illumina_Data/Kallisto",
+                              max=Inf)
+
+head(kallisto_res)
+dim(kallisto_res) #3606    8
+```
+
+```{r}
+kallisto_res.filtered <- kallisto_res %>% 
+  filter(grepl(files.regex, Key)) %>% 
+  filter(!grepl("\\/$", Key)) %>% 
+  mutate(Sample=str_split_fixed(Key, pattern="/", n=5)[,4]) %>% 
+  mutate(Sample=gsub("_gencode.+", "", Sample)) %>% 
+  select(Sample, everything())
+
+
+head(kallisto_res.filtered)
+length(unique(kallisto_res.filtered$Sample)) #677 OK
+```
+
+```{r eval=FALSE}
+missing.kallisto <- sample_sheet %>% 
+  filter(!Sample %in% kallisto_res.filtered$Sample)
+
+
+dim(missing.kallisto)
+# write.table(missing.kallisto,"Remission_APL_JMML_MDA_resubmit_Sample_Sheet.txt", row.names = F, quote=F, sep="\t")
+# write.table(missing.kallisto,file.path(SCRIPTS, "batch_pipeline/sample_sheets/Remission_JPL_JMML_MDA_resubmit_Sample_Sheet.txt"), row.names = F, quote=F, sep="\t")
+```
+
+```{r}
+#Save the file paths on S3 to a text file for download
+files <- unique(dirname(kallisto_res.filtered[["Key"]]))
+
+head(files)
+
+outdir <- file.path(SCRATCH,"jlsmith3/Kallisto_Remission")
+dir.create(outdir)
+# write.table(x = files, file = paste(outdir,"TARGET_AML_Remission_JPL_JMML_MDA_results.txt", sep="/"),
+#             quote=FALSE, row.names=FALSE, col.names=FALSE)
+
+
+length(files)
+```
+
+
+# Download the Kallisto Results
+
+
+```{bash}
+DEST="/fh/scratch/delete90/meshinchi_s/jlsmith3/Kallisto_Remission"
+sbatch ~/scripts/sbatch_jobs/Download_S3.sh "TARGET_AML_Remission_JPL_JMML_MDA_results.txt" $DEST "recursive"
+```
+
+# TXimport with the HDF5 files
+
+https://wurmlab.github.io/genomicscourse/2016-SIB/practicals/rnaseq/TP2
+For this purpose, they introduced the "scaledTPM" values, which are obtained by summing the transcript-level TPMs by gene, and multiplying them with the total library size in millions. 
+
+ScaledTPM values are artificial values, transforming underlying abundance measures to the scale of read counts. This allows to incorporate the information provided by the sequencing depth, and work with RNA-seq differential expression tools that were developed to use read counts.
+
+countsFromAbundance:
+character, either "no" (default), "scaledTPM", or "lengthScaledTPM", for whether to generate estimated counts using abundance estimates scaled up to library size (scaledTPM) or additionally scaled using the average transcript length over samples and the library size (lengthScaledTPM). if using scaledTPM or lengthScaledTPM, then the counts are no longer correlated with average transcript length, and so the length offset matrix should not be used.
+
+```{r}
+library(rslurm)
+library(tximport)
+```
+
+```{r}
+IDmap <- read.csv(file=file.path(HOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_Gene_IDmap.csv"))
+
+dim(IDmap)
+# head(IDmap)
+# write.table(IDmap, 
+#             file=file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_TranscriptLevel_IDmap_1.18.20.txt"),
+#             row.names = FALSE, sep="\t")
+
+#Check that there are no dates as gene-names
+# grep("^[0-9]\\-", IDmap$gene_name, value=TRUE)
+# grep("SEPT", IDmap$gene_name, value=TRUE)
+```
+
+```{r}
+destination <- file.path(SCRATCH, "jlsmith3/Kallisto_Remission")
+
+files <- dir(destination, 
+             pattern = ".h5",
+             full.names = TRUE, 
+             recursive = TRUE)
+names(files) <- gsub("_RBS_with.+", "", str_split_fixed(dirname(files),"/",n=8)[,8])
+
+tx2gene <- dplyr::select(IDmap, transcript_id, gene_id)
+
+sopt <- list(nodes='1', 'cpus-per-task'='16',
+             'partition'='campus-new', 'mem'='62G',
+             'time' = '24:00:00', 'mail-type'='END,FAIL',
+             'mail-user'='jlsmith3@fredhutch.org') 
+
+
+length(files)
+head(files)
+# tail(files)
+# dir.create(file.path(destination, "tx_import"))
+```
+
+```{r}
+out <- file.path(destination, "tx_import")
+setwd(out)
+
+txi.geneLevel.job <- slurm_call(f=tximport,
+                     jobname = "remission_gene",
+                     params =  list(files = files,
+                                    type="kallisto", 
+                                    tx2gene = tx2gene, 
+                                    txIn = TRUE,
+                                    txOut = FALSE,
+                                    ignoreAfterBar = TRUE, 
+                                    dropInfReps= TRUE,
+                                    countsFromAbundance = "scaledTPM"),
+                     add_objects = c("files","tx2gene"),
+                     slurm_options=sopt,
+                     submit = TRUE) #Submitted batch job 
+
+
+```
+
+
+
+```{r}
+out <- file.path(destination, "tx_import")
+setwd(out)
+
+txi.txLevel.job <- slurm_call(f=tximport,
+                     jobname = "remission_tx",
+                     params =  list(files = files,
+                                    type="kallisto", 
+                                    tx2gene = tx2gene, 
+                                    txIn = TRUE,
+                                    txOut = TRUE,
+                                    ignoreAfterBar = TRUE, 
+                                    dropInfReps= TRUE,
+                                    countsFromAbundance = "scaledTPM"),
+                     add_objects = c("files","tx2gene"),
+                     slurm_options=sopt,
+                     submit = TRUE) #Submitted batch job 
+
+
+# str(txi.txLevel.job) 
+```
+
+
+
+
+## read in the results of tximport 
+
+```{r}
+destination <- file.path(SCRATCH, "jlsmith3/Kallisto_Remission")
+out <- file.path(destination, "tx_import")
+```
+
+```{r}
+txi.geneLevel <- readRDS(file.path(out, "_rslurm_remission_gene/results_0.RDS"))
+txi.geneLevel$countsFromAbundance
+```
+
+```{r}
+rem_sample_info <- sample_info %>% 
+  filter(grepl("rem", Batch))
+
+
+dim(rem_sample_info)
+```
+
+```{r}
+geneIDmap <- read.delim(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_GeneLevel_IDmap_anno_5.14.21.txt"))
+
+head(geneIDmap[,1:5])
+dim(geneIDmap)
+```
+
+```{r}
+lapply(txi.geneLevel[c(1:3)], function(x) head(x[,1:5]))
+sapply(txi.geneLevel[c(1:3)], dim)
+
+# head(txi.geneLevel$counts[,1:5])
+# tail(txi.geneLevel$counts[,1:5])
+
+# any(is.na(colnames(txi.geneLevel$abundance)))
+# any(duplicated(colnames(txi.geneLevel$abundance)))
+
+# rownames(txi.geneLevel$abundance)[1000:1005]
+```
+
+```{r}
+counts_matrices <- lapply(txi.geneLevel[c(1:3)], function(df){
+    
+    colnames(df) <- gsub("-",".", colnames(df))
+    rownames(df) <- gsub("\\.[0-9]{1,2}", "", rownames(df))
+    # rownames(df) <- gsub("\\.[0-9]{1,2}_", "", rownames(df))
+    
+    df %>% 
+       as.data.frame() %>% 
+       rownames_to_column("gene_id") %>% 
+       left_join(., select(geneIDmap,gene_id, gene_name), 
+                by="gene_id") %>% 
+      select(gene_id,gene_name, everything())
+  })
+
+lapply(counts_matrices[c(1:3)], function(x) head(x[,1:10]))
+sapply(counts_matrices[c(1:3)], dim)
+
+# # any(is.na(counts_matrices$abundance$gene_name))
+# any(is.na(colnames(counts_matrices$abundance)))
+# any(duplicated(colnames(counts_matrices$abundance)))
+# table(colnames(counts_matrices$abundance) %in% rem_sample_info$Sample)
+# table(rem_sample_info$Sample %in% colnames(counts_matrices$abundance))
+
+
+
+#OK we know that we're missing these samples BAMs, but have recieved counts from BCCA
+#working on addressing this with BCCA 8/12/21
+# data.frame(colnames=colnames(counts_matrices$abundance)) %>%
+#   filter(!grepl("gene", colnames)) %>%
+#   full_join(.,select(rem_sample_info, Sample, matches("Patient")),
+#             by=c("colnames"="Sample")) %>%
+#   filter(is.na(colnames) | is.na(Final_Patient_ID))
+```
+
+```{r}
+# saveRDS(counts_matrices$abundance,
+#           "TARGET_AML_Remission_APL_JMML_MDAnderson_Kallisto_Quant_GeneLevel_Abundance_TPM.RDS")
+# 
+# saveRDS(counts_matrices$counts,
+#           "TARGET_AML_Remission_APL_JMML_MDAnderson_Kallisto_Quant_GeneLevel_scaledTPM_counts.RDS")
+# 
+# saveRDS(counts_matrices$length,
+#           "TARGET_AML_Remission_APL_JMML_MDAnderson_Kallisto_Quant_GeneLevel_scaledTPM_length.RDS")
+# 
+# saveRDS(counts_matrices$abundance,
+#         file.path(PROJHOME,"0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/TARGET_AML_Remission_APL_JMML_MDAnderson_Kallisto_Quant_GeneLevel_Abundance_TPM.RDS"))
+# 
+# saveRDS(counts_matrices$counts,
+#           file.path(PROJHOME,"0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/TARGET_AML_Remission_APL_JMML_MDAnderson_Kallisto_Quant_GeneLevel_scaledTPM_counts.RDS"))
+# 
+# saveRDS(counts_matrices$length,
+#           file.path(PROJHOME,"0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/TARGET_AML_Remission_APL_JMML_MDAnderson_Kallisto_Quant_GeneLevel_scaledTPM_length.RDS"))
+```
+
+### Transcript Level 
+
+```{r}
+txi.transcriptLevel <- readRDS(file.path(out, "_rslurm_remission_tx/results_0.RDS")) 
+txi.transcriptLevel$countsFromAbundance
+```
+
+```{r}
+new_rownames <- str_split_fixed(rownames(txi.transcriptLevel$abundance), 
+                                pattern = "\\|", n = 2)[,1] 
+# new_rownames[1500]
+
+txi.transcriptLevel[c(1:3)] <- lapply(txi.transcriptLevel[c(1:3)],set_rownames, value=new_rownames)
+```
+
+```{r}
+# lapply(txi.transcriptLevel[c(1:3)], function(x) head(x[,1:5]))
+# lapply(txi.transcriptLevel[c(1:3)], function(x) tail(x[,1:5]))
+sapply(txi.transcriptLevel[c(1:3)], dim)
+```
+
+```{r}
+transcript_matrices <- lapply(txi.transcriptLevel[c(1:3)], function(df){
+    
+    colnames(df) <- gsub("-",".", colnames(df))
+
+    
+    df %>% 
+       as.data.frame() %>% 
+       rownames_to_column("transcript_id") %>% 
+       left_join(., select(IDmap,transcript_id, gene_name), 
+                by="transcript_id") %>% 
+      select(transcript_id,gene_name, everything())
+  })
+
+lapply(transcript_matrices[c(1:3)], function(x) head(x[,1:10]))
+sapply(transcript_matrices[c(1:3)], dim)
+
+# any(is.na(transcript_matrices$abundance$gene_name))
+# any(duplicated(colnames(transcript_matrices$abundance)))
+```
+
+```{r}
+# saveRDS(transcript_matrices$abundance,
+#           "TARGET_AML_Remission_APL_JMML_MDAnderson_Kallisto_Quant_TranscriptLevel_Abundance_TPM.RDS")
+# 
+# saveRDS(transcript_matrices$counts,
+#           "TARGET_AML_Remission_APL_JMML_MDAnderson_Kallisto_Quant_TranscriptLevel_scaledTPM_counts.RDS")
+# 
+# saveRDS(transcript_matrices$length,
+#           "TARGET_AML_Remission_APL_JMML_MDAnderson_Kallisto_Quant_TranscriptLevel_scaledTPM_length.RDS")
+# 
+# saveRDS(transcript_matrices$abundance,
+#         file.path(PROJHOME,"0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/TARGET_AML_Remission_APL_JMML_MDAnderson_Kallisto_Quant_TranscriptLevel_Abundance_TPM.RDS"))
+# 
+# saveRDS(transcript_matrices$counts,
+#           file.path(PROJHOME,"0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/TARGET_AML_Remission_APL_JMML_MDAnderson_Kallisto_Quant_TranscriptLevel_scaledTPM_counts.RDS"))
+# 
+# saveRDS(transcript_matrices$length,
+#           file.path(PROJHOME,"0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/TARGET_AML_Remission_APL_JMML_MDAnderson_Kallisto_Quant_TranscriptLevel_scaledTPM_length.RDS"))
+```
+
+
+
+NOTE:
+  
+  If markdown cannot be completed with pandoc (memory issues), use the following
+
+> library("rmarkdown")
+> render("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/TARGET_AML_1031_Cat_RNAseq.Rmd", "html_document")
+
+
+#Session Info
+
+```{r}
+sessionInfo()
+```
+

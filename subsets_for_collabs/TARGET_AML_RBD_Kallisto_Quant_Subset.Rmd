@@ -1,0 +1,200 @@
+---
+title: "Organize and Subset RNA-seq"
+author: "Jenny Smith"
+date: "June 6, 2019"
+output: html_document
+---
+  
+  
+#Set-up
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 5, fig.width = 5)
+knitr::opts_knit$set(root.dir = '/fh/scratch/delete90/meshinchi_s/jlsmith3/kallisto')
+options(stringsAsFactors = FALSE)
+```
+
+```{r message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(reshape2)
+library(tibble)
+getwd()
+```
+
+
+#Read in the Gene Annotations
+
+```{r}
+geneIDmap <- read.csv("~/RNA_seq_Analysis/0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_GeneLevel_IDmap_anno.csv")
+
+head(geneIDmap)
+dim(geneIDmap)
+```
+
+
+
+
+#Read in the TPMs, Clean and Organize
+
+
+# Transcript TPMs
+
+```{r eval=FALSE}
+tx.1031 <- read.csv("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level3/transcript/concat_matrices/2017July_BCCA_1031_Kallisto_GRCh38_Illumina_data/TARGET_AML_0531_1031_Kallisto_Quant_TranscriptLevel_Abundance_TPM.csv")
+
+tx.names <- str_split(tx.1031$X, "\\|") %>% 
+  sapply(., '[[', 1)
+
+rownames(tx.1031) <- tx.names
+tx.1031 <- tx.1031[,-1]
+
+head(tx.1031[,1:5])
+tail(tx.1031[,1:5])
+```
+
+
+## AML and NBM Transcripts
+
+```{r}
+#remove cell lines, MPN, flow sorted and replicate samples
+tx.RBD <- tx.1031[,-grep("Kas|MV4|MPN|Sort|replicate|PolyA", colnames(tx.1031), ignore.case = TRUE)]
+tx.polyA <- tx.1031[,-grep("Kas|MV4|MPN|Sort|replicate|RBS", colnames(tx.1031), ignore.case = TRUE)]
+
+
+#change to only USI for colnames
+colnames(tx.RBD) <- str_split_fixed(colnames(tx.RBD),  "\\.", 5)[,3]
+colnames(tx.polyA) <- str_split_fixed(colnames(tx.polyA),  "\\.", 5)[,3]
+
+
+head(tx.RBD[,1:5])
+dim(tx.RBD)
+
+head(tx.polyA[,1:5])
+dim(tx.polyA)
+# dim(tx.RBD) #1462 samples and 207826 transcripts
+
+# saveRDS(tx.RBD, "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level3/transcript/concat_matrices/2017July_BCCA_1031_Kallisto_GRCh38_Illumina_data/TARGET_AML_RBD_Kallisto_Quant_TranscriptLevel_TPM.RDS")
+
+# saveRDS(tx.polyA, "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level3/transcript/concat_matrices/2017July_BCCA_1031_Kallisto_GRCh38_Illumina_data/TARGET_AML_PolyA_Kallisto_Quant_TranscriptLevel_TPM.RDS")
+```
+
+
+
+# Gene TPMs
+
+```{r}
+gene.1031 <- read.csv("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level3/transcript/concat_matrices/2017July_BCCA_0531_1031_Kallisto_GRCh38_Illumina_data/TARGET_AML_0531_1031_Kallisto_Quant_GeneLevel_scaledTPM_counts.csv", row.names = 1)
+
+dim(gene.1031)
+head(gene.1031[,1:5])
+```
+
+```{r}
+gene.rel <- readRDS("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level3/transcript/concat_matrices/2019Feb_BCCA_1031_Relapse_Kallisto_GRCh38_Illumina_data/TARGET_AML_RBD_Relapse_Kallisto_Quant_GeneLevel_scaledTPM_counts.RDS")
+
+dim(gene.rel)
+head(gene.rel[,1:5])
+```
+
+## AML and NBM
+
+```{r}
+#remove cell lines, MPN, flow sorted and replicate samples
+gene.RBD <- gene.1031[,-grep("Kas|MV4|MPN|Sort|replicate|PolyA", colnames(gene.1031), ignore.case = TRUE)]
+
+gene.polyA <- gene.1031[,-grep("Kas|MV4|MPN|Sort|replicate|RBS", colnames(gene.1031), ignore.case = TRUE)]
+
+
+#change to only USI for colnames
+colnames(gene.RBD) <- str_split_fixed(colnames(gene.RBD),  "\\.", 5)[,3]
+colnames(gene.polyA) <- str_split_fixed(colnames(gene.polyA),  "\\.", 5)[,3]
+
+
+head(gene.RBD[,1:5])
+dim(gene.RBD)
+
+head(gene.polyA[,1:5])
+dim(gene.polyA)
+
+
+
+# saveRDS(gene.polyA, "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level3/transcript/concat_matrices/2017July_BCCA_1031_Kallisto_GRCh38_Illumina_data/TARGET_AML_PolyA_Kallisto_Quant_GeneLevel_TPM.RDS")
+
+# saveRDS(gene.RBD, "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level3/transcript/concat_matrices/2017July_BCCA_1031_Kallisto_GRCh38_Illumina_data/TARGET_AML_RBD_Kallisto_Quant_GeneLevel_TPM.RDS")
+```
+
+
+#Gene Counts
+
+```{r}
+gene.cts <- read.csv("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level3/transcript/concat_matrices/2017July_BCCA_0531_1031_Kallisto_GRCh38_Illumina_data/TARGET_AML_0531_1031_Kallisto_Quant_GeneLevel_scaledTPM_counts.csv", row.names = 1)
+dim(gene.cts)
+head(gene.cts[,1:5])
+```
+
+
+
+## AML and NBM 
+
+```{r}
+cts <- cts[,-grep("Kas|MV4|MPN|Sort|replicate|PolyA", colnames(cts), ignore.case = TRUE)]
+colnames(cts) <- str_split_fixed(colnames(cts),  "\\-", 5)[,3]
+head(cts[,1:5])
+dim(cts)
+
+cts.polyA <- gene.cts[,-grep("Kas|MV4|MPN|Sort|replicate|RBS", colnames(gene.cts), ignore.case = TRUE)]
+colnames(cts.polyA) <- str_split_fixed(colnames(cts.polyA),  "\\.", 5)[,3]
+head(cts.polyA[,1:5])
+dim(cts.polyA)
+
+
+
+
+# saveRDS(cts,"/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level3/transcript/concat_matrices/2017July_BCCA_1031_Kallisto_GRCh38_Illumina_data/TARGET_AML_RBD_Kallisto_Quant_GeneLevel_scaledTPM_counts.RDS")
+
+
+# saveRDS(cts.polyA,"~/RNA_seq_Analysis/0000.00.03_Expression_Matrices/TARGET_AML_polyA_Kallisto_Quant_GeneLevel_scaledTPM_counts.RDS")
+```
+
+
+##Cell Lines 
+
+```{r}
+#remove cell lines, MPN, flow sorted and replicate samples
+celllines1 <- gene.1031[,grep("Kas|MV4|CGSH|K562|NOMO1|MO7E", colnames(gene.1031))] 
+celllines2 <- gene.rel[,grep("Kas|MV4|CGSH|K562|NOMO1|MO7E", colnames(gene.rel))]
+identical(rownames(celllines1), rownames(celllines2))
+
+
+celllines <- cbind(celllines1, celllines2) %>% 
+  rownames_to_column("gene_id") %>%
+  mutate(gene_id=gsub("\\.[0-9]{1,2}$","",gene_id)) %>%
+  inner_join(.,geneIDmap, by="gene_id") %>% 
+  select(gene_id,gene_name, everything())
+
+
+dim(celllines)
+head(celllines)
+# write.csv(celllines, "TARGET_AML_CellLines_Kallisto_Quant_GeneLevel_TPM.csv")
+```
+
+```{r}
+options(scipen = 999)
+celllines %>% 
+  filter(grepl("GLI[0-9]", gene_name)) %>% 
+  arrange(gene_name) %>% 
+  # write.csv(.,"Celllines_RNAseq_GLI_Expression_TPM.csv", row.names = FALSE)
+```
+
+
+
+
+#Session Info
+
+```{r}
+sessionInfo()
+```
+

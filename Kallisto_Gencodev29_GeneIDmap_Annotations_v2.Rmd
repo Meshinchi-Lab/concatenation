@@ -1,0 +1,127 @@
+---
+title: "Genes Highly Expressed in AML and Co-Expression Analysis"
+author: "Jenny Smith"
+date: "March 12, 2019"
+output: html_document
+---
+
+#Set-Up
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, 
+                      fig.align='center', fig.height = 10,
+                      fig.width = 10)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,'/2018.02.12_AML_Specific_Transcripts/'))
+options(stringsAsFactors=FALSE,  java.parameters = "-Xmx4g",
+        bitmapType = 'cairo',device='x11' )
+
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message=FALSE}
+library(dplyr)
+library(magrittr)
+library(stringr)
+library(tibble)
+library(tidyr)
+library(purrr)
+
+library(tictoc)
+
+getwd()
+```
+
+
+#Define Functions
+
+# Read in the references 
+
+```{r}
+#Read in the reference files 
+compartments <- data.table::fread("https://download.jensenlab.org/human_compartment_knowledge_full.tsv")
+
+head(compartments)
+dim(compartments) #581,955      7
+# table(compartments$V6)
+```
+
+Subcellular main location	scml
+Subcellular additional location	scal
+
+```{r}
+tic()
+hpa_test <- read.delim(textConnection(RCurl::getURL("https://www.proteinatlas.org/api/search_download.php?search=ENSG00000186092&format=tsv&columns=eg,scml,scal&compress=no")),
+                       sep="\t", header = T)
+toc()
+
+head(hpa_test)
+```
+
+https://www.proteinatlas.org/api/search_download.php?search=P53&format=json&columns=g,gs&compress=no
+
+https://www.proteinatlas.org/api/search_download.php?search=P53&format=tsv&columns=g,gs&compress=no
+
+
+# Gene ID References
+
+```{r}
+transcriptID.map.anno <- read.delim(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_TranscriptLevel_IDmap_1.18.20.txt"),
+                                    sep="\t")
+
+
+dim(transcriptID.map.anno) #207826     22
+head(transcriptID.map.anno)
+```
+
+
+```{r}
+geneID.map <- transcriptID.map.anno %>% 
+  dplyr::select(ensembl_id=gene_id,gene_name,gene_type) %>% 
+  distinct() 
+
+
+dim(geneID.map)
+head(geneID.map) #59853     3
+```
+
+Gene level annotations 
+* HPA subcellular locs
+
+Transcript/Protein level
+* compartments DB
+* uniprot? can I search ENSP?
+
+for Unprot
+* taxonomy human 
+* keywords 
+* TMhelix 
+* Protein.names
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

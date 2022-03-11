@@ -1,0 +1,120 @@
+---
+title: "Run and Concatenate STAR Fusions"
+author: "Jenny Smith"
+date: ""
+output: html_document
+---
+
+# Set-up 
+
+```{r setup, cache = FALSE, include = FALSE}
+require(knitr)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,"2021.08.21_Remission_STAR_Fusion"))
+```
+
+```{r}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),
+                      tidy=TRUE,
+                      fig.align='center',
+                      fig.width = 10, fig.height = 10)
+node=Sys.info()[["nodename"]]
+if(!grepl("local", node)){
+  print(node)
+  options(bitmapType = 'cairo')
+  grDevices::X11.options(type='cairo')
+}
+
+options(stringsAsFactors = FALSE)
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+
+library(ggplot2)
+library(gridExtra)
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+
+library(DeGSEA)
+
+getwd()
+```
+
+
+
+#ClinData
+
+```{r}
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_"))
+
+merged <- merged %>% 
+  filter(!is.na(USI), USI != "Unknown") %>% 
+  filter(Eligibility_Comments != "remove")
+
+
+dim(merged)
+```
+
+```{r}
+sample_info <- read.csv(file.path(TARGET, "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_06.09.21.csv")) 
+```
+
+
+#Create Sample Sheet
+
+
+```{r}
+creds <- aws.signature::use_credentials(profile = "default")
+Sys.setenv("AWS_ACCESS_KEY_ID" = creds$default$AWS_ACCESS_KEY_ID,
+           "AWS_SECRET_ACCESS_KEY" = creds$default$AWS_SECRET_ACCESS_KEY,
+           "AWS_DEFAULT_REGION"="us-west-2")
+
+
+blist <- bucketlist()
+blist
+
+BUCKET="fh-pi-meshinchi-s-eco-public"
+PREFIX="TARGET_AML/RNAseq_Illumina_Data/Fastq"
+
+
+# fastqs <- get_bucket_df(bucket = BUCKET, 
+#                         prefix = PREFIX,
+#                         max = Inf)
+# 
+# head(fastqs) # 15429     8
+# dim(fastqs)
+```
+
+
+```{r}
+fastq.manifest <- read.csv(file.path(TARGET,"SequencingDataMatrix/Fastq_manifests/TARGET_AML_RNAseq_Fastq_File_Manifest_08.11.21.csv"))
+
+# head(fastq.manifest)
+```
+
+```{r}
+sample_sheet <- fastq.manifest %>% 
+  filter(grepl("rem", Batch)) %>% 
+  select(Sample, R1=Read1, R2=Read2) %>% 
+  mutate_at(vars(R1,R2), ~paste("s3:/", BUCKET,PREFIX,., sep="/"))
+
+
+# write.table(sample_sheet,file.path(SCRIPTS,"STAR-fusion-NF/sample_sheets/TARGET_AML_Remission_JMML_APL_MDAnderson_sample_sheet.txt"), quote=FALSE, row.names = FALSE, sep="\t")
+# write.table(sample_sheet,"TARGET_AML_Remission_JMML_APL_MDAnderson_sample_sheet.txt", quote=FALSE, row.names = FALSE, sep="\t")
+
+# length(unique(sample_sheet$Sample)) #OK
+# dim(sample_sheet)
+```
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+

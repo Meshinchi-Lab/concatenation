@@ -1,0 +1,575 @@
+---
+title: "Merge RNAseq Counts Matrices"
+author: "Jenny Smith"
+date: "2/4/21"
+output: html_document
+---
+
+# Set-up 
+
+```{r setup, cache = FALSE, include = FALSE}
+require(knitr)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,"0000.00.03_ExpressionMatrices/"))
+```
+
+```{r}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),
+                      tidy=TRUE,
+                      fig.align='center',
+                      fig.width = 10, fig.height = 10)
+node=Sys.info()[["nodename"]]
+if(!grepl("local", node)){
+  print(node)
+  options(bitmapType = 'cairo')
+  grDevices::X11.options(type='cairo')
+}
+
+options(stringsAsFactors = FALSE)
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+
+library(ggplot2)
+library(gridExtra)
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+
+library(DeGSEA)
+
+# getwd()
+```
+
+
+# ClinData
+
+```{r}
+# merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_12.09.20.csv"))
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_05.21.21.csv")) 
+
+
+dim(merged)
+```
+
+```{r}
+sample_info <- read.csv(file.path(TARGET,"SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_08.12.21.csv"))
+
+head(sample_info[,1:5])
+dim(sample_info)
+```
+
+
+# Gene Annotations
+
+```{r}
+GRCh37_IDmap <- read.csv(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/GeneSymbol_Ensembl_ID_Conversion_GRCh37.69_FromBCCA.csv"))
+
+head(GRCh37_IDmap)
+dim(GRCh37_IDmap)
+```
+
+```{r}
+GRCh38_IDmap <- read.delim(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_GeneLevel_IDmap_anno_5.14.21.txt"))
+
+head(GRCh38_IDmap[,1:5])
+dim(GRCh38_IDmap)
+```
+
+
+# GRCh37
+
+```{r}
+counts_dirs <- dir(PROJHOME, full.names = T) %>% 
+  grep(".+Concat.+", ., ignore.case = T, value=T) %>% 
+  grep("Fusion",., invert = T, value=T)
+
+# dir(counts_dirs[1],recursive=TRUE)
+counts_dirs
+```
+
+```{r}
+cts.files <- lapply(counts_dirs, dir,
+                    recursive=TRUE, 
+                    pattern="FractionalCounts.csv",
+                    full.names=TRUE) %>% 
+  unlist() %>% 
+  grep("geneLevel", .,  value=T) %>% 
+  grep("dupGenesRemoved", ., invert=T, value=T)
+
+
+cts.files
+```
+
+
+```{r}
+tpm.files <- lapply(counts_dirs, dir,
+                    recursive=TRUE, 
+                    pattern="TPM.csv",
+                    full.names=TRUE)  %>% 
+  unlist() %>%
+  grep("geneLevel", .,  value=T) %>% 
+  grep("dupGenesRemoved|withStella|Batch2", ., invert=T, value=T)
+
+tpm.files
+```
+
+
+```{r}
+cts_dfs <- purrr::map_dfc(.x = cts.files, .f = read.csv)
+
+
+head(cts_dfs[,1:5])
+dim(cts_dfs) #58450  3050
+```
+
+
+* geneSymbol -> geneSymbol...1
+* gene_id -> gene_id...2
+* TARGET.20.PASMSZ.03A.01R -> TARGET.20.PASMSZ.03A.01R...415
+* TARGET.20.PATGTL.03A.01R -> TARGET.20.PATGTL.03A.01R...475
+* TARGET.20.PAXWMS.03A.01R -> TARGET.20.PAXWMS.03A.01R...1557
+
+
+```{r}
+cols_to_change <- grep("TARGET.20.PASMSZ.03A.01R|TARGET.20.PATGTL.03A.01R|TARGET.20.PAXWMS.03A.01R|geneSymbol|gene_id|^X|^V",colnames(cts_dfs), value=T)
+
+cols_to_change
+```
+
+```{r}
+cts_dfs.clean <- cts_dfs[,!grepl("geneSymbol...1577|geneSymbol...2121|geneSymbol...2350|gene_id...2351", colnames(cts_dfs))]
+colnames(cts_dfs.clean)[1:2] <- c("geneSymbol","gene_id")
+
+idx1 <- grep("TARGET.20.PASMSZ.03A.01R...415|TARGET.20.PATGTL.03A.01R...475|TARGET.20.PAXWMS.03A.01R...1557",colnames(cts_dfs.clean))
+idx2 <- grep("TARGET.20.PATGTL.03A.01R...162|TARGET.20.PASMSZ.03A.01R...1683|TARGET.20.PAXWMS.03A.01R...1758",colnames(cts_dfs.clean))
+colnames(cts_dfs.clean)[idx1] <- gsub("\\.\\.\\.[0-9]+$", "", colnames(cts_dfs.clean)[idx1]) 
+colnames(cts_dfs.clean)[idx2] <- gsub("^(T.+R)...+$", "\\1_replicate", colnames(cts_dfs.clean)[idx2])
+
+
+dim(cts_dfs.clean) #58450  3046
+head(cts_dfs.clean[,1:5])
+```
+
+```{r}
+table(sample_info$Sample %in% colnames(cts_dfs.clean)) #Stella
+# grep("PASMSZ", colnames(cts_dfs.clean), value=T)
+
+# sample_info %>% 
+#   filter(!Sample %in% colnames(cts_dfs.clean))
+
+
+head(colnames(cts_dfs.clean))
+tail(colnames(cts_dfs.clean))
+```
+
+```{r}
+#seperate out those genes without duplicate symbols 
+cts.sym_noDups <- cts_dfs.clean %>% 
+  filter(!duplicated(geneSymbol), !duplicated(geneSymbol, fromLast = TRUE))
+
+dim(cts.sym_noDups) #50979  3046
+
+#calculate the averate for all duplicate gene symbols. 
+cts.sym_Dups <- cts_dfs.clean %>% 
+  filter(duplicated(geneSymbol) | duplicated(geneSymbol, fromLast = TRUE)) %>% 
+  arrange(geneSymbol) %>% 
+  
+  #Calculate IQR to measure variance
+  rowwise() %>% 
+  mutate(IQR=IQR(c_across(Kasumi.AZA.D11.03A.01R:TARGET.20.WSUAML.50A.01R))) %>% 
+  ungroup() %>%
+  
+  #use the max IQR expression to address duplicate gene symbols
+  group_by(geneSymbol) %>%
+  mutate(Rank=rank(IQR,ties.method= "first")) %>%
+  mutate(Keep=ifelse(Rank==max(Rank), TRUE, FALSE)) %>%
+  ungroup() %>% 
+  select(IQR, Rank, Keep, everything())
+
+
+# head(cts.sym_Dups[,1:10])
+dim(cts.sym_Dups) #1719 2118
+
+#remove duplicated geneSymbols
+cts.sym_Dups <- cts.sym_Dups %>% 
+  filter(Keep) %>% 
+  select(-IQR,-Keep, -Rank) 
+
+
+dim(cts.sym_Dups) #174 2118
+# head(kallisto.cts.sym_rmDups)
+
+cts.sym_final <- bind_rows(cts.sym_noDups, cts.sym_Dups)
+
+dim(cts.sym_final) #51573  3046
+head(cts.sym_final[,1:5]) 
+
+
+# saveRDS(cts.sym_final, file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AML_MPN_DS_NBM_3044Samples_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_FractionalCounts.RDS"))
+```
+
+
+### Update PATGIG and PATISD colnames
+
+```{r}
+#Now to update the counts matrices for PATGIG and PATISD
+bcca.files <- dir(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/BCCA_GRCh37_Ensembl_v69"), 
+                      pattern = "TARGET_AML_RBD_Dx_Rlps_NBM_MPN",
+                      recursive = TRUE,
+                      full.names = TRUE)
+# kallisto.files
+
+bcca.data <- lapply(bcca.files, function(x) readRDS(x))
+names(bcca.data) <- gsub("^.+(TARGET.+RDS)","\\1", bcca.files)
+
+
+bcca.data.fixed <- lapply(names(bcca.data), function(x){
+  df <- bcca.data[[x]]
+  colnames(df)[grep("PATGIG|PATISD", colnames(df))] <- gsub("_replicate","", 
+                                                        grep("PATGIG|PATISD", colnames(df), value=TRUE))
+  name <- grep(x, bcca.files, value=T)
+  # saveRDS(df, file=name)
+  
+  return(df)
+})
+names(bcca.data.fixed) <- names(bcca.data)
+
+
+# lapply(bcca.data, function(x) grep("PATGIG|PATISD", colnames(x), value=TRUE))
+# lapply(bcca.data, dim)
+# 
+# lapply(bcca.data.fixed, function(x) grep("PATGIG|PATISD", colnames(x), value=TRUE))
+# lapply(bcca.data.fixed, dim)
+```
+
+
+```{r}
+tpm_dfs <- purrr::map_dfc(.x = tpm.files, .f = read.csv)
+
+
+head(tpm_dfs[,1:5])
+dim(tpm_dfs) #58450  3050
+```
+
+New names:
+* geneSymbol -> geneSymbol...1
+* gene_id -> gene_id...2
+* TARGET.20.PASMSZ.03A.01R -> TARGET.20.PASMSZ.03A.01R...415
+* TARGET.20.PATGTL.03A.01R -> TARGET.20.PATGTL.03A.01R...475
+* TARGET.20.PAXWMS.03A.01R -> TARGET.20.PAXWMS.03A.01R...1557
+* ...
+
+```{r}
+cols_to_change <- grep("TARGET.20.PASMSZ.03A.01R|TARGET.20.PATGTL.03A.01R|TARGET.20.PAXWMS.03A.01R|geneSymbol|gene_id|^X|^V",colnames(tpm_dfs), value=T)
+
+cols_to_change
+```
+
+```{r}
+tpm_dfs.clean <- tpm_dfs[,!grepl("geneSymbol...1577|geneSymbol...2121|geneSymbol...2350|gene_id...2351", colnames(tpm_dfs))]
+colnames(tpm_dfs.clean)[1:2] <- c("geneSymbol","gene_id")
+
+idx1 <- grep("TARGET.20.PASMSZ.03A.01R...415|TARGET.20.PATGTL.03A.01R...475|TARGET.20.PAXWMS.03A.01R...1557",colnames(tpm_dfs.clean))
+idx2 <- grep("TARGET.20.PATGTL.03A.01R...1626|TARGET.20.PASMSZ.03A.01R...1683|TARGET.20.PAXWMS.03A.01R...1758",colnames(tpm_dfs.clean))
+colnames(tpm_dfs.clean)[idx1] <- gsub("\\.\\.\\.[0-9]+$", "", colnames(tpm_dfs.clean)[idx1]) 
+colnames(tpm_dfs.clean)[idx2] <- gsub("^(T.+R)...+$", "\\1_replicate", colnames(tpm_dfs.clean)[idx2])
+
+
+dim(tpm_dfs.clean) # 58450  3046
+head(tpm_dfs.clean[,1:5])
+```
+
+```{r}
+table(sample_info$Sample %in% colnames(tpm_dfs.clean)) #Stella
+# grep("PASMSZ", colnames(tpm_dfs.clean), value=T)
+
+# sample_info %>% 
+#   filter(!Sample %in% colnames(tpm_dfs.clean))
+
+# 
+# head(colnames(tpm_dfs.clean))
+# tail(colnames(tpm_dfs.clean))
+```
+
+
+```{r}
+#seperate out those genes without duplicate symbols 
+tpm.sym_noDups <- tpm_dfs.clean %>% 
+  filter(!duplicated(geneSymbol), !duplicated(geneSymbol, fromLast = TRUE))
+
+dim(tpm.sym_noDups) #50979  3046
+
+#calculate the averate for all duplicate gene symbols. 
+tpm.sym_Dups <- tpm_dfs.clean %>% 
+  filter(duplicated(geneSymbol) | duplicated(geneSymbol, fromLast = TRUE)) %>% 
+  arrange(geneSymbol) %>% 
+  
+  #Calculate IQR to measure variance
+  rowwise() %>% 
+  mutate(IQR=IQR(c_across(Kasumi.AZA.D11.03A.01R:TARGET.20.WSUAML.50A.01R))) %>% 
+  ungroup() %>%
+  
+  #use the max IQR expression to address duplicate gene symbols
+  group_by(geneSymbol) %>%
+  mutate(Rank=rank(IQR,ties.method= "first")) %>%
+  mutate(Keep=ifelse(Rank==max(Rank), TRUE, FALSE)) %>%
+  ungroup() %>% 
+  select(IQR, Rank, Keep, everything())
+
+
+# head(tpm.sym_Dups[,1:10])
+dim(tpm.sym_Dups) #1719 2118
+
+#remove duplicated geneSymbols
+tpm.sym_Dups <- tpm.sym_Dups %>% 
+  filter(Keep) %>% 
+  select(-IQR,-Keep, -Rank) 
+
+
+dim(tpm.sym_Dups) #174 2118
+
+
+tpm.sym_final <- bind_rows(tpm.sym_noDups, tpm.sym_Dups)
+
+dim(tpm.sym_final) #51573  3046
+head(tpm.sym_final[,1:5]) 
+
+
+
+# saveRDS(tpm.sym_final, file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AML_MPN_DS_NBM_3044Samples_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_TPM.RDS"))
+```
+
+
+# GRCh38 Kallisto Counts 
+
+```{r}
+kallisto.files <- dir(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29"), 
+                      pattern = "RDS",
+                      recursive = TRUE,
+                      full.names = TRUE) %>% 
+  grep("gene_level", ., value=TRUE) %>% 
+  grep("00_Archive|[Pp]olyA|length", ., value=TRUE, invert = TRUE)
+
+
+# kallisto.files
+```
+
+```{r}
+kallisto.counts <- lapply(kallisto.files[grep("counts", kallisto.files)], function(x){ 
+  res <- readRDS(x)
+  if(!is.data.frame(res)){
+    res <- as.data.frame(res) %>% 
+      rownames_to_column("gene_id")
+  }
+  
+  colnames(res) <- gsub("-","\\.", colnames(res))
+  res$gene_id <- gsub("\\.[0-9]{1,2}","",res$gene_id)
+  return(res)
+  
+})
+
+names(kallisto.counts) <- gsub("^.+(TARGET.+RDS)","\\1", kallisto.files[grep("counts", kallisto.files)])
+
+# sapply(kallisto.counts, dim)
+# sapply(kallisto.counts, class)
+```
+
+
+```{r}
+kallisto.counts.df <- kallisto.counts$TARGET_AML_RBD_Dx_Rlps_NBM_MPN_Kallisto_Quant_GeneLevel_scaledTPM_counts.RDS %>% 
+  left_join(., kallisto.counts$TARGET_AML_Remission_APL_JMML_MDAnderson_Kallisto_Quant_GeneLevel_scaledTPM_counts.RDS) %>% 
+  left_join(., kallisto.counts$TARGET_AML_RBD_DSAML_Kallisto_Quant_GeneLevel_scaledTPM_counts.RDS)
+
+
+rownames(kallisto.counts.df) <- kallisto.counts.df$gene_id
+kallisto.counts.df <- kallisto.counts.df[-grep("gene_name|gene_id",colnames(kallisto.counts.df))]
+kallisto.counts.df <- as.matrix(kallisto.counts.df)
+
+
+
+colnames(kallisto.counts.df)[grep("PATGIG|PATISD", colnames(kallisto.counts.df))] <- gsub("_replicate","", grep("PATGIG|PATISD", colnames(kallisto.counts.df), value=TRUE))
+
+
+
+head(kallisto.counts.df[,1:5])
+dim(kallisto.counts.df) #59853  3021
+
+all(complete.cases(kallisto.counts.df)) #TRUE
+any(duplicated(colnames(kallisto.counts$TARGET_AML_RBD_DSAML_Kallisto_Quant_GeneLevel_scaledTPM_counts.RDS)))
+```
+
+```{r}
+kallisto.counts.rmDups <- kallisto_rmDups(kallisto.counts.df, geneIDmap = GRCh38_IDmap)
+
+
+dim(kallisto.counts.rmDups) #58263  3023
+head(kallisto.counts.rmDups[,1:5])
+
+# saveRDS(kallisto.counts.rmDups, "Kallisto_GRCh38_Gencode_v29/TARGET_AML_RBD_Dx_Rlps_NBM_MPN_JMML_APL_DS_MDAnderson_Kallisto_Quant_GeneLevel_dupGenesRemoved_scaledTPM_counts.RDS")
+```
+
+
+
+```{r}
+kallisto.TPM <- lapply(kallisto.files[grep("Abundance", kallisto.files)], function(x){
+  res <- readRDS(x) 
+  if(!is.data.frame(res)){
+    res <- as.data.frame(res) %>% 
+      rownames_to_column("gene_id")
+  }
+  
+  colnames(res) <- gsub("-","\\.", colnames(res))
+  res$gene_id <- gsub("\\.[0-9]{1,2}","",res$gene_id)
+  return(res)
+
+})
+names(kallisto.TPM) <- gsub("^.+(TARGET.+RDS)","\\1", kallisto.files[grep("Abundance", kallisto.files)])
+sapply(kallisto.TPM, dim)
+```
+
+
+```{r}
+kallisto.TPM.df <- kallisto.TPM$TARGET_AML_RBD_Dx_Rlps_NBM_MPN_Kallisto_Quant_GeneLevel_Abundance_TPM.RDS %>% 
+  left_join(., kallisto.TPM$TARGET_AML_Remission_APL_JMML_MDAnderson_Kallisto_Quant_GeneLevel_Abundance_TPM.RDS) %>% 
+  left_join(., kallisto.TPM$TARGET_AML_RBD_DSAML_Kallisto_Quant_GeneLevel_Abundance_TPM.RDS)
+
+rownames(kallisto.TPM.df) <- kallisto.TPM.df$gene_id
+kallisto.TPM.df <- kallisto.TPM.df[-grep("gene_name|gene_id",colnames(kallisto.TPM.df))]
+kallisto.TPM.df <- as.matrix(kallisto.TPM.df)
+
+
+colnames(kallisto.TPM.df)[grep("PATGIG|PATISD", colnames(kallisto.TPM.df))] <- gsub("_replicate","", grep("PATGIG|PATISD", colnames(kallisto.TPM.df), value=TRUE))
+
+
+head(kallisto.TPM.df[,1:5])
+dim(kallisto.TPM.df) #59853  3023
+
+all(complete.cases(kallisto.TPM.df)) #TRUE
+any(duplicated(colnames(kallisto.TPM.df)))
+```
+
+
+
+```{r}
+kallisto.TPM.rmDups <- kallisto_rmDups(kallisto.TPM.df, geneIDmap = GRCh38_IDmap)
+
+
+dim(kallisto.TPM.rmDups) #58263  3023
+head(kallisto.TPM.rmDups[,1:5])
+
+# saveRDS(kallisto.TPM.rmDups, "Kallisto_GRCh38_Gencode_v29/TARGET_AML_RBD_Dx_Rlps_NBM_MPN_JMML_APL_DS_MDAnderson_Kallisto_Quant_GeneLevel_dupGenesRemoved_Abundance_TPM.RDS")
+```
+
+
+
+
+
+
+# Files to Share with Ben Huang
+
+```{r eval=FALSE}
+#cts to Share with Ben
+tpm_df1 <- read_csv(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AML_0531_1031_Ribodepleted_RNAseq_dupGenesRemoved_TPM.csv")) %>%
+  select(Gene=X1,everything())
+
+
+tpm_df2 <- read_csv(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_0531_1031_Relapse_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_TPM.csv")) %>% 
+  select(Gene=X1,everything()) %>%
+  rename_at(vars(TARGET.20.PARSHM.03A.01R:TARGET.20.PAWDTX.04A.01R),
+            ~ifelse(. %in% colnames(tpm_df1), paste0(.,"_replicate"), .))
+
+tpm_df3 <- read_csv(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_1031_Remission_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_TPM.csv")) %>% 
+  select(Gene=X1,everything())
+
+
+tpm_df4 <- read_csv(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AAML08B1_AAML1531_Ribodepleted_RNAseq_DS-AML_dupGenesRemoved_TPM.csv")) %>% 
+  select(Gene=X1,everything())
+
+
+head(tpm_df1[,1:5])
+dim(tpm_df1)
+#
+head(tpm_df2[,1:5])
+dim(tpm_df2)
+#
+head(tpm_df3[,1:5])
+dim(tpm_df3) #51573   301
+
+head(tpm_df4[,1:5])
+dim(tpm_df4) #51573   301
+
+identical(tpm_df1$Gene, tpm_df2$Gene) #OK
+identical(tpm_df1$Gene, tpm_df3$Gene)
+identical(tpm_df1$Gene, tpm_df4$Gene)
+
+Reduce(intersect, list(colnames(tpm_df1),
+                       colnames(tpm_df2), 
+                       colnames(tpm_df3),
+                       colnames(tpm_df4))) #OK 
+
+tpm_final <- bind_cols(tpm_df1, tpm_df2[,-1], tpm_df3[,-1], tpm_df4[,-1])
+dim(tpm_final) #51573  2646
+
+
+# saveRDS(tpm_final,file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AML_MPN_DS_NBM_2646Samples_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_TPM.RDS"))
+```
+
+```{r eval=FALSE}
+#cts to Share with Ben
+cts_df1 <- read_csv(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AML_0531_1031_Ribodepleted_RNAseq_dupGenesRemoved_FractionalCounts.csv")) %>%
+  select(Gene=X1,everything())
+
+
+cts_df2 <- read_csv(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_0531_1031_Relapse_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_FractionalCounts.csv")) %>% 
+  select(Gene=X1,everything()) %>%
+  rename_at(vars(TARGET.20.PARSHM.03A.01R:TARGET.20.PAWDTX.04A.01R),
+            ~ifelse(. %in% colnames(cts_df1), paste0(.,"_replicate"), .))
+
+cts_df3 <- read_csv(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_1031_Remission_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_FractionalCounts.csv")) %>% 
+  select(Gene=X1,everything())
+
+
+cts_df4 <- read_csv(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AAML08B1_AAML1531_Ribodepleted_RNAseq_DS-AML_dupGenesRemoved_FractionalCounts.csv")) %>% 
+  select(Gene=X1,everything())
+
+
+head(cts_df1[,1:5])
+dim(cts_df1)
+#
+head(cts_df2[,1:5])
+dim(cts_df2)
+#
+head(cts_df3[,1:5])
+dim(cts_df3) #51573   301
+
+head(cts_df4[,1:5])
+dim(cts_df4) #51573   301
+
+identical(cts_df1$Gene, cts_df2$Gene) #OK
+identical(cts_df1$Gene, cts_df3$Gene)
+identical(cts_df1$Gene, cts_df4$Gene)
+
+Reduce(intersect, list(colnames(cts_df1),
+                       colnames(cts_df2), 
+                       colnames(cts_df3),
+                       colnames(cts_df4))) #OK 
+
+cts_final <- bind_cols(cts_df1, cts_df2[,-1], cts_df3[,-1], cts_df4[,-1])
+dim(cts_final) #51573  2646
+
+
+# saveRDS(cts_final,file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AML_MPN_DS_NBM_2646Samples_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_FractionalCounts.RDS"))
+```
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+
