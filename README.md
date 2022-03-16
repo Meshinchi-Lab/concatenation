@@ -28,6 +28,8 @@ This will combine the multiple large matrices (.csv/.txt or .RDS files), which w
 
 ```
 rclone sync 0000.00.03_ExpressionMatrices/ dropbox_remote:/0000.00.03_ExpressionMatrices/ --filter-from 0000.00.03_ExpressionMatrices_Filters -P
+
+rclone sync 0000.00.03_ExpressionMatrices/ aws_eco_pub:/fh-pi-meshinchi-s-eco-public/TARGET_AML/RNAseq_Illumina_Data/Expression/0000.00.03_ExpressionMatrices/ --filter-from 0000.00.03_ExpressionMatrices_Filters -P
 ```
 
 Rclone will need to be configured to connect to [dropbox](https://rclone.org/dropbox/) and [AWS S3](https://rclone.org/s3/). The shared directories or prefixes on AWS should be `read-only` for collaborators. Also, it maybe useful to consider how to make the syncing process more automated. 
