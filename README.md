@@ -24,10 +24,24 @@ The output matrices are then saved in two locations A) fast drive under `/fh/fas
 
 This will combine the multiple large matrices (.csv/.txt or .RDS files), which will also run the `kallisto_rmDups()` function to remove duplicate gene names. That final de-duped matrix is the main shareable counts matrix - currently > 3000 samples. 
 
-The Sample manifests were then updated for the concatenated final matrix using the `TARGET_AML_Sequencing_Manifests_05.05.21.Rmd` file under the `SequencingDataMatrix` github repository. This script is a data cleaning script, and can be used a template. But it probably should only be edited and modified for ~1 year. Then start a fresh data matrix generation script using it as a template. 
+3) Sync the expression data matrices with the collaborators using `rclone`. 
 
+```
+rclone sync 0000.00.03_ExpressionMatrices/ dropbox_remote:/0000.00.03_ExpressionMatrices/ --filter-from 0000.00.03_ExpressionMatrices_Filters -P
+```
+
+Rclone will need to be configured to connect to [dropbox](https://rclone.org/dropbox/) and [AWS S3](https://rclone.org/s3/). The shared directories or prefixes on AWS should be `read-only` for collaborators. Also, it maybe useful to consider how to make the syncing process more automated. 
+
+4) The Sample manifests were then updated for the concatenated final matrix using the `TARGET_AML_Sequencing_Manifests_05.05.21.Rmd` file under the `SequencingDataMatrix` github repository. 
+
+This script is a data cleaning script, and can be used a template. But it probably should only be edited and modified for ~1 year. Then start a fresh data matrix generation script using it as a template. 
 
 
 Author: Jenny Leopoldina Smith<br>
 ORCID: [0000-0003-0402-2779](https://orcid.org/0000-0003-0402-2779)
 <br>
+
+### References
+
+* [Rclone at Fred Hutch](https://sciwiki.fredhutch.org/compdemos/Economy-storage/#rclone)
+* [AWS S3 at Fred Hutch](https://sciwiki.fredhutch.org/compdemos/Economy-storage/#amazon-web-services-s3-compatibility-layer)
