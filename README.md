@@ -16,6 +16,12 @@ The concensus between the three fusion algorithms is noted by presence/absence a
 
 #### RNA-seq Quantification Data 
 
+**BCCA Procedure**
+
+TO DO
+
+**Kallisto Procedure**
+
 1) Each batch of RNA-seq quantification data are first processed individually. For example, the down syndrome AML RNA-seq data was downloaded from S3 and then concatenated using `tximport` R package in `concat_Kallisto/TARGET_AML_RBD_Kallisto_Quant_DSAML_Concatenation.Rmd`. 
 
 The output matrices are then saved in two locations A) fast drive under `/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level3` in gene level or transcript level direcories, and B) `/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/0000.00.03_ExpressionMatrices`. The second directory is the main "working copy" and if anything damages it, the clean copies can be found in level 3 directories. 
