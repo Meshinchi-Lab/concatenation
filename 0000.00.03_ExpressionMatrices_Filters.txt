@@ -1,0 +1,8 @@
+#Filter rules for syncing the local fast drive 0000.00.03_ExpressionMatrices with Dropbox
+# rclone sync 0000.00.03_ExpressionMatrices/ dropbox_dname:/0000.00.03_ExpressionMatrices/ --filter-from ~/scripts/rclone_filters/0000.00.03_ExpressionMatrices_Filters -P
+- */00_Archive/*
+- */subsets/*
+- .DS_Store
++ *.RDS
++ *.csv
++ *.txt
